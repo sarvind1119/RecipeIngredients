@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Calculate requirement{% endblock %}
+
+{% block content %}
+<h1>Calculate ingredient requirement</h1>
+
+{% if dishes %}
+<form method="post" class="panel narrow-wide">
+  <label for="dish_id">Dish / menu item</label>
+  <select id="dish_id" name="dish_id" required autofocus>
+    <option value="">— Select a dish —</option>
+    {% for d in dishes %}
+      <option value="{{ d.id }}" data-base="{{ d.base_persons }}"
+        {% if selected.get('dish_id')|string == d.id|string or request.args.get('dish_id')|string == d.id|string %}selected{% endif %}>
+        {{ d.name }} ({{ d.category }}) — base {{ d.base_persons }} persons
+      </option>
+    {% endfor %}
+  </select>
+  <p class="hint" id="base-hint"></p>
+
+  <div class="grid-2">
+    <div>
+      <label for="persons_required">Number of persons to be served</label>
+      <input type="number" id="persons_required" name="persons_required" min="1" required
+             value="{{ selected.get('persons_required', '') }}" placeholder="e.g. 90">
+    </div>
+    <div>
+      <label for="meal_type">Meal</label>
+      <select id="meal_type" name="meal_type" required>
+        <option value="">— Select —</option>
+        {% for m in meal_types %}
+          <option value="{{ m }}" {% if selected.get('meal_type') == m %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <label for="course_name">Course / occasion <span class="opt">(optional)</span></label>
+      <input type="text" id="course_name" name="course_name"
+             value="{{ selected.get('course_name', '') }}" placeholder="e.g. Foundation Course 2026">
+    </div>
+    <div>
+      <label for="meal_date">Date of meal</label>
+      <input type="date" id="meal_date" name="meal_date"
+             value="{{ selected.get('meal_date') or today }}">
+    </div>
+  </div>
+
+  <div class="quick-persons no-print">
+    <span>Common strengths:</span>
+    {% for n in [60, 90, 120, 180] %}
+      <button type="button" class="chip" data-persons="{{ n }}">{{ n }}</button>
+    {% endfor %}
+  </div>
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Generate requirement</button>
+  </div>
+</form>
+
+<script>
+(function () {
+  var dish    = document.getElementById('dish_id');
+  var persons = document.getElementById('persons_required');
+  var hint    = document.getElementById('base-hint');
+
+  function showBase() {
+    var opt = dish.options[dish.selectedIndex];
+    var base = opt && opt.dataset.base;
+    hint.textContent = base
+      ? 'Standard recipe is written for ' + base + ' persons. Quantities are scaled in direct proportion.'
+      : '';
+  }
+  dish.addEventListener('change', showBase);
+  showBase();
+
+  document.querySelectorAll('.chip').forEach(function (chip) {
+    chip.addEventListener('click', function () { persons.value = chip.dataset.persons; });
+  });
+})();
+</script>
+{% else %}
+  <p class="empty">No recipes are on record yet.
+    {% if is_admin %}<a href="{{ url_for('dish_new') }}">Add the first one</a>.
+    {% else %}Ask an administrator to add one.{% endif %}
+  </p>
+{% endif %}
+{% endblock %}

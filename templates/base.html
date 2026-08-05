@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Officers' Mess — Recipe System{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}" media="print">
+</head>
+<body>
+{% if current_user.id %}
+<header class="topbar no-print">
+  <div class="brand">
+    <span class="crest">&#9733;</span>
+    <div>
+      <strong>Officers' Mess</strong>
+      <small>Recipe Scaling &amp; Ingredient Requirement</small>
+    </div>
+  </div>
+  <nav>
+    <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="{{ url_for('calculate') }}" class="{% if request.endpoint == 'calculate' %}active{% endif %}">Calculate</a>
+    <a href="{{ url_for('dishes') }}" class="{% if request.endpoint in ('dishes', 'dish_detail', 'dish_form', 'dish_new', 'dish_edit', 'dish_import', 'dish_import_review') %}active{% endif %}">Recipes</a>
+    <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">History</a>
+    {% if is_admin %}
+      <a href="{{ url_for('users') }}" class="{% if request.endpoint == 'users' %}active{% endif %}">Users</a>
+    {% endif %}
+  </nav>
+  <div class="user-box">
+    <span class="who">{{ current_user.full_name }}
+      <span class="role-chip {{ current_user.role }}">{{ current_user.role }}</span>
+    </span>
+    <a href="{{ url_for('change_password') }}" class="link-sm">Password</a>
+    <a href="{{ url_for('logout') }}" class="link-sm">Sign out</a>
+  </div>
+</header>
+{% endif %}
+
+<main class="{% if not current_user.id %}centered{% endif %}">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes no-print">
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="no-print">
+  Officers' Mess Recipe Scaling System &middot; quantities are scaled in direct
+  proportion to the base recipe
+</footer>
+</body>
+</html>

@@ -1,0 +1,10 @@
+mess.db
+mess.db-wal
+mess.db-shm
+.secret_key
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+review.csv

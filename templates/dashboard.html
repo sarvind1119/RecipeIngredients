@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stat-row">
+  <a class="stat" href="{{ url_for('dishes') }}">
+    <span class="stat-value">{{ dish_count }}</span>
+    <span class="stat-label">Recipes on record</span>
+  </a>
+  <div class="stat">
+    <span class="stat-value">{{ ingredient_count }}</span>
+    <span class="stat-label">Ingredients in master</span>
+  </div>
+  <a class="stat" href="{{ url_for('history') }}">
+    <span class="stat-value">{{ requisition_count }}</span>
+    <span class="stat-label">Requirements generated</span>
+  </a>
+</div>
+
+<div class="cta-row">
+  <a href="{{ url_for('calculate') }}" class="btn primary large">Calculate ingredient requirement</a>
+  {% if is_admin %}
+    <a href="{{ url_for('dish_new') }}" class="btn large">Add a new recipe</a>
+    <a href="{{ url_for('admin_backup') }}" class="btn large">Download backup</a>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Recent requirements</h2>
+  {% if recent %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>No.</th><th>Dish</th><th>Course</th><th>Meal</th>
+          <th>Date</th><th class="num">Persons</th><th>By</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in recent %}
+        <tr>
+          <td>{{ r.id }}</td>
+          <td><strong>{{ r.dish_name_snapshot }}</strong></td>
+          <td>{{ r.course_name or '—' }}</td>
+          <td>{{ r.meal_type }}</td>
+          <td>{{ r.meal_date }}</td>
+          <td class="num">{{ r.persons_required }}</td>
+          <td>{{ r.generated_by_name or '—' }}</td>
+          <td><a href="{{ url_for('requisition_view', requisition_id=r.id) }}" class="link-sm">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">No requirements generated yet.
+      {% if dish_count %}<a href="{{ url_for('calculate') }}">Calculate one now</a>.
+      {% else %}Start by {% if is_admin %}<a href="{{ url_for('dish_new') }}">adding a recipe</a>{% else %}asking an administrator to add a recipe{% endif %}.{% endif %}
+    </p>
+  {% endif %}
+</div>
+{% endblock %}

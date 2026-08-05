@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ dish.name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ dish.name }}</h1>
+    <p class="sub">{{ dish.category }} &middot; standard recipe for
+      <strong>{{ dish.base_persons }} persons</strong>
+      {% if not dish.is_active %}<span class="role-chip">removed</span>{% endif %}
+    </p>
+  </div>
+  <div class="btn-row">
+    <a href="{{ url_for('calculate') }}?dish_id={{ dish.id }}" class="btn primary">Calculate</a>
+    {% if is_admin %}<a href="{{ url_for('dish_edit', dish_id=dish.id) }}" class="btn">Edit</a>{% endif %}
+  </div>
+</div>
+
+{% if dish.notes %}<div class="note-box">{{ dish.notes }}</div>{% endif %}
+
+<table class="data">
+  <thead><tr><th>S.No</th><th>Ingredient</th><th class="num">Quantity</th><th>Unit</th></tr></thead>
+  <tbody>
+    {% for i in ingredients %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ i.name }}</td>
+      <td class="num">{{ format_qty(i.quantity) }}</td>
+      <td>{{ i.unit }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p><a href="{{ url_for('dishes') }}" class="link-sm">&larr; Back to recipes</a></p>
+{% endblock %}

@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mess-recipe-app",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app.py"],
+      "port": 5002,
+      "autoPort": true
+    }
+  ]
+}

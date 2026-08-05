@@ -1,0 +1,20 @@
+# Recipe document importer only. Deliberately NOT in requirements.txt: the Mess
+# PC that serves the app should not have to install PaddlePaddle (several
+# hundred MB) to run a Flask server. Install this only on the machine that
+# converts the department's documents.
+#
+#     pip install -r requirements-import.txt
+
+# Digital PDFs. Word (.docx) is read with the standard library; spreadsheets use
+# openpyxl, which requirements.txt already installs for the Excel export.
+pdfplumber
+
+# Claude fallback for lines the rules parser cannot settle, and for scans OCR
+# was not confident about. Optional - without it those lines stay flagged.
+anthropic
+
+# Offline OCR for scans and photographs. The heaviest item here by far; skip
+# both lines if the department only ever sends digital documents.
+paddleocr
+paddlepaddle
+pillow

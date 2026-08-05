@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+
+{% block content %}
+<h1>Requirement history</h1>
+<p class="sub">Every requirement is stored exactly as it was generated. Editing a
+  recipe afterwards does not change a past requisition.</p>
+
+<form method="get" class="filter-bar">
+  <input type="search" name="q" value="{{ search }}" placeholder="Search by dish or course…">
+  <button type="submit" class="btn">Search</button>
+  {% if search %}<a href="{{ url_for('history') }}" class="btn ghost">Clear</a>{% endif %}
+</form>
+
+{% if requisitions %}
+<table class="data">
+  <thead>
+    <tr>
+      <th>No.</th><th>Dish</th><th>Course</th><th>Meal</th><th>Date</th>
+      <th class="num">Base</th><th class="num">Persons</th><th>By</th><th>Generated</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in requisitions %}
+    <tr>
+      <td>{{ r.id }}</td>
+      <td><strong>{{ r.dish_name_snapshot }}</strong></td>
+      <td>{{ r.course_name or '—' }}</td>
+      <td>{{ r.meal_type }}</td>
+      <td>{{ r.meal_date }}</td>
+      <td class="num muted">{{ r.base_persons_snapshot }}</td>
+      <td class="num strong">{{ r.persons_required }}</td>
+      <td>{{ r.generated_by_name or '—' }}</td>
+      <td class="muted">{{ r.generated_at }}</td>
+      <td class="actions">
+        <a href="{{ url_for('requisition_view', requisition_id=r.id) }}" class="link-sm">Open</a>
+        <a href="{{ url_for('requisition_pdf', requisition_id=r.id) }}" class="link-sm" target="_blank" rel="noopener">PDF</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="empty">{% if search %}Nothing matches that search.{% else %}No requirements generated yet.{% endif %}</p>
+{% endif %}
+{% endblock %}

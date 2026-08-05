@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Officers' Mess Recipe System{% endblock %}
+
+{% block content %}
+<div class="login-card">
+  <div class="login-head">
+    <span class="crest big">&#9733;</span>
+    <h1>Officers' Mess</h1>
+    <p>Recipe Scaling &amp; Ingredient Requirement System</p>
+  </div>
+  <form method="post">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" required autofocus autocomplete="username">
+
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required autocomplete="current-password">
+
+    <button type="submit" class="btn primary block">Sign in</button>
+  </form>
+</div>
+{% endblock %}

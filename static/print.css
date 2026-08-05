@@ -1,0 +1,75 @@
+/* Print view — browser Ctrl+P should produce a clean requisition sheet, not a
+   screenshot of the web page. The PDF export remains the formal document. */
+
+@page { size: A4; margin: 14mm; }
+
+.no-print,
+.topbar,
+footer,
+.flashes,
+.btn,
+.btn-row,
+.page-head .btn-row,
+.filter-bar,
+.quick-persons { display: none !important; }
+
+.print-only { display: block !important; }
+
+body { background: #fff; font-size: 11pt; color: #000; }
+main { max-width: none; padding: 0; margin: 0; }
+
+.print-title { text-align: center; margin-bottom: 10px; }
+.print-title h1 { font-size: 16pt; margin: 0; letter-spacing: 1px; }
+.print-title p { font-size: 11pt; margin: 2px 0 0; font-weight: 600; }
+
+.panel {
+  border: 1px solid #000;
+  border-radius: 0;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  break-inside: avoid;
+}
+
+dl.meta { grid-template-columns: repeat(3, 1fr); gap: 6px 14px; }
+dl.meta dt { font-size: 8pt; color: #444; }
+dl.meta dd { font-size: 10pt; }
+dl.meta .highlight dd { font-size: 11pt; }
+
+table.data { border: 1px solid #000; border-radius: 0; }
+table.data th {
+  background: #dfe4ea !important;
+  color: #000 !important;
+  border-bottom: 1px solid #000;
+  font-size: 8.5pt;
+  padding: 5px 7px;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+table.data td { padding: 4px 7px; border-top: 1px solid #999; font-size: 10pt; }
+table.data tbody tr:nth-child(even) { background: #f6f7f9 !important; }
+table.data .strong { color: #000; font-weight: 700; }
+
+/* Repeat column headings when the ingredient list runs past one page. */
+thead { display: table-header-group; }
+tr { break-inside: avoid; }
+
+.hint { font-size: 8.5pt; color: #333; }
+
+.signatures {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 22mm;
+  break-inside: avoid;
+}
+.signatures div {
+  width: 30%;
+  text-align: center;
+  font-size: 9.5pt;
+  font-weight: 600;
+}
+.signatures span {
+  display: block;
+  border-bottom: 1px solid #000;
+  margin-bottom: 4px;
+  height: 1px;
+}

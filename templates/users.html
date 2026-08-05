@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+
+{% block content %}
+<h1>Users</h1>
+<p class="sub"><strong>Admin</strong> maintains recipes. <strong>Staff</strong> can
+  calculate requirements and print them, but cannot alter a standard recipe.</p>
+
+<table class="data">
+  <thead>
+    <tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Created</th><th>Reset password</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for u in users %}
+    <tr class="{% if not u.is_active %}inactive{% endif %}">
+      <td><strong>{{ u.username }}</strong></td>
+      <td>{{ u.full_name or '—' }}</td>
+      <td><span class="role-chip {{ u.role }}">{{ u.role }}</span></td>
+      <td>
+        {% if u.is_active %}Active{% else %}<span class="muted">Deactivated</span>{% endif %}
+        {% if u.must_change_password %}<span class="role-chip">must change password</span>{% endif %}
+      </td>
+      <td class="muted">{{ u.created_at }}</td>
+      <td>
+        <form method="post" action="{{ url_for('user_reset', user_id=u.id) }}" class="inline-form">
+          <input type="password" name="new_password" placeholder="New password" minlength="6" required>
+          <button type="submit" class="btn ghost sm">Reset</button>
+        </form>
+      </td>
+      <td>
+        {% if u.id != current_user.id %}
+        <form method="post" action="{{ url_for('user_toggle', user_id=u.id) }}">
+          <button type="submit" class="link-sm {% if u.is_active %}danger{% endif %}">
+            {% if u.is_active %}Deactivate{% else %}Reactivate{% endif %}
+          </button>
+        </form>
+        {% else %}<span class="muted">(you)</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="panel narrow-wide">
+  <h2>Add a user</h2>
+  <form method="post">
+    <div class="grid-2">
+      <div>
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required>
+      </div>
+      <div>
+        <label for="full_name">Full name</label>
+        <input type="text" id="full_name" name="full_name">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div>
+        <label for="password">Initial password</label>
+        <input type="password" id="password" name="password" minlength="6" required>
+        <p class="hint">They will be asked to change this at first login.</p>
+      </div>
+      <div>
+        <label for="role">Role</label>
+        <select id="role" name="role">
+          <option value="staff">Staff — calculate and print only</option>
+          <option value="admin">Admin — can also maintain recipes</option>
+        </select>
+      </div>
+    </div>
+    <button type="submit" class="btn primary">Create user</button>
+  </form>
+</div>
+
+<div class="panel narrow-wide">
+  <h2>Database backup</h2>
+  <p class="hint">The whole recipe database is a single file. Download a copy and
+    keep it somewhere safe.</p>
+  <a href="{{ url_for('admin_backup') }}" class="btn">Download backup</a>
+</div>
+{% endblock %}

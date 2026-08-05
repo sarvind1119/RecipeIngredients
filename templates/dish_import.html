@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Import recipes{% endblock %}
+
+{% block content %}
+<h1>Import recipes from a document</h1>
+
+<form method="post" class="panel" enctype="multipart/form-data">
+  <p class="hint">
+    Upload a recipe document from the mess department. The system reads the
+    ingredients out of it and shows you each recipe in the normal recipe form,
+    filled in, for you to check before it is saved. Nothing is saved until you
+    press Save on that screen.
+  </p>
+
+  <label for="document">Recipe document</label>
+  <input type="file" id="document" name="document" required
+         accept=".docx,.pdf,.xlsx,.xlsm,.png,.jpg,.jpeg,.tif,.tiff,.webp">
+  <p class="hint">
+    Word (.docx), PDF, Excel, or a scan/photograph. One file at a time; a file
+    holding several recipes is handled a recipe at a time. Maximum 25 MB.
+  </p>
+
+  <label class="check">
+    <input type="checkbox" name="use_llm" checked>
+    Use AI assistance for lines the system cannot read on its own
+  </label>
+  <p class="hint">
+    Only the lines that could not be read are sent, and only when the assistant
+    is configured on this PC. It is never allowed to invent a quantity - an
+    unreadable line comes back marked for you either way.
+  </p>
+
+  <div class="note-box">
+    <strong>Two things the system will always ask you for.</strong>
+    <ul>
+      <li><strong>How many persons the recipe serves.</strong> The documents
+        never state it, and every scaled quantity is worked out from it, so it
+        cannot be guessed.</li>
+      <li><strong>Anything written vaguely</strong> - "salt to taste",
+        "2-inch ginger", "50 chopped garlic". These are highlighted on the next
+        screen with the original wording, for you to replace with the quantity
+        the mess actually issues.</li>
+    </ul>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Read document</button>
+    <a href="{{ url_for('dishes') }}" class="btn ghost">Cancel</a>
+  </div>
+</form>
+{% endblock %}

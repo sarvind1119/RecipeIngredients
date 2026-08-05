@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}{% if import_ctx %}Check imported recipe{% elif dish and dish.id %}Edit recipe{% else %}Add recipe{% endif %}{% endblock %}
+
+{% block content %}
+{% if import_ctx %}
+<h1>Check imported recipe</h1>
+
+<div class="note-box import-banner">
+  <p>
+    <strong>Recipe {{ import_ctx.position }} of {{ import_ctx.total }}</strong>
+    from <strong>{{ import_ctx.source_file }}</strong>.
+    Read from the document — check it against the original before saving.
+  </p>
+  {% if import_ctx.flagged %}
+  <p class="warn">
+    {{ import_ctx.flagged }} row{{ 's' if import_ctx.flagged != 1 }} could not be
+    read and {{ 'are' if import_ctx.flagged != 1 else 'is' }} highlighted below.
+    The document's own wording is shown under each one. Fill in the quantity the
+    mess actually issues — the recipe will not save until you do.
+  </p>
+  {% endif %}
+  <p class="warn">
+    Enter how many persons this recipe serves. The document does not say, and
+    every scaled quantity is worked out from it.
+  </p>
+</div>
+{% else %}
+<h1>{% if dish and dish.id %}Edit recipe{% else %}Add recipe{% endif %}</h1>
+{% endif %}
+
+<form method="post" class="panel"
+      action="{% if import_ctx %}{{ url_for('dish_new') }}{% endif %}">
+  {% if import_ctx %}<input type="hidden" name="import_next" value="1">{% endif %}
+  <div class="grid-3">
+    <div>
+      <label for="name">Dish / menu item</label>
+      <input type="text" id="name" name="name" required autofocus
+             value="{{ dish.name if dish else '' }}" placeholder="e.g. Chicken Biryani">
+    </div>
+    <div>
+      <label for="category">Category</label>
+      <select id="category" name="category">
+        {% for c in categories %}
+          <option value="{{ c }}" {% if dish and dish.category == c %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="base_persons">Standard recipe is for</label>
+      <div class="suffix-field">
+        <input type="number" id="base_persons" name="base_persons" min="1" required
+               value="{{ dish.base_persons if dish else '' }}" placeholder="10">
+        <span>persons</span>
+      </div>
+    </div>
+  </div>
+
+  <label for="notes">Notes <span class="opt">(optional)</span></label>
+  <textarea id="notes" name="notes" rows="2"
+            placeholder="Preparation notes, garnish, accompaniments…">{{ dish.notes if dish else '' }}</textarea>
+
+  <h2>Ingredients</h2>
+  <p class="hint">Enter the quantities for the base number of persons above. The
+    system scales from these figures. Blank rows are ignored.</p>
+
+  <datalist id="ingredient-list"></datalist>
+
+  <table class="data entry" id="ingredient-table">
+    <thead>
+      <tr><th class="sn">S.No</th><th>Ingredient</th><th class="qty">Quantity</th><th class="unit">Unit</th><th></th></tr>
+    </thead>
+    <tbody id="ingredient-rows">
+      {% for i in ingredients %}
+      {% set flagged = i.status and i.status != 'ok' %}
+      <tr {% if flagged %}class="needs-attention"{% endif %}>
+        <td class="sn"></td>
+        <td>
+          <input type="text" name="ingredient_name" list="ingredient-list"
+                 value="{{ i.name }}" autocomplete="off">
+          {% if i.source_line %}
+          <span class="source-line" title="The wording in the document">“{{ i.source_line }}”</span>
+          {% endif %}
+          {% if i.suggested_name %}
+          <span class="suggestion">Did you mean <button type="button" class="link-btn use-suggestion"
+                data-name="{{ i.suggested_name }}">{{ i.suggested_name }}</button>?</span>
+          {% endif %}
+        </td>
+        <td><input type="number" name="ingredient_quantity" step="any" min="0"
+                   value="{{ format_qty(i.quantity) if i.quantity else '' }}"></td>
+        <td>
+          <select name="ingredient_unit">
+            {% if flagged and not i.unit %}<option value="" selected>—</option>{% endif %}
+            {% for u in units %}<option value="{{ u }}" {% if i.unit == u %}selected{% endif %}>{{ u }}</option>{% endfor %}
+          </select>
+        </td>
+        <td><button type="button" class="row-remove" title="Remove row">&times;</button></td>
+      </tr>
+      {% if flagged and i.note %}
+      <tr class="note-row"><td></td><td colspan="4"><span class="row-note">{{ i.note }}</span></td></tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <button type="button" id="add-row" class="btn ghost">+ Add ingredient</button>
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">
+      {% if import_ctx %}Save and continue{% else %}Save recipe{% endif %}
+    </button>
+    {% if not import_ctx %}
+    <a href="{{ url_for('dishes') }}" class="btn ghost">Cancel</a>
+    {% endif %}
+  </div>
+</form>
+
+{% if import_ctx %}
+{# Outside the form above: nesting forms is invalid HTML and browsers drop the
+   inner one, which would silently break Skip and Abandon. #}
+<div class="form-actions import-actions">
+  <form method="post" action="{{ url_for('dish_import_skip') }}">
+    <button type="submit" class="btn ghost">Skip this recipe</button>
+  </form>
+  <form method="post" action="{{ url_for('dish_import_cancel') }}">
+    <button type="submit" class="btn ghost danger">Abandon import</button>
+  </form>
+</div>
+{% endif %}
+
+<template id="row-template">
+  <tr>
+    <td class="sn"></td>
+    <td><input type="text" name="ingredient_name" list="ingredient-list" autocomplete="off"></td>
+    <td><input type="number" name="ingredient_quantity" step="any" min="0"></td>
+    <td>
+      <select name="ingredient_unit">
+        {% for u in units %}<option value="{{ u }}">{{ u }}</option>{% endfor %}
+      </select>
+    </td>
+    <td><button type="button" class="row-remove" title="Remove row">&times;</button></td>
+  </tr>
+</template>
+
+<script>
+(function () {
+  var tbody    = document.getElementById('ingredient-rows');
+  var template = document.getElementById('row-template');
+  var datalist = document.getElementById('ingredient-list');
+  var unitOf   = {};
+
+  // An imported recipe interleaves .note-row rows carrying the document's own
+  // wording. They are not ingredients, so they are excluded everywhere a row
+  // count or a row position is meant.
+  function entryRows() { return tbody.querySelectorAll('tr:not(.note-row)'); }
+
+  function renumber() {
+    var rows = entryRows();
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].querySelector('.sn').textContent = i + 1;
+    }
+  }
+
+  function addRow(focus) {
+    tbody.appendChild(template.content.cloneNode(true));
+    renumber();
+    if (focus) {
+      var inputs = tbody.querySelectorAll('input[name="ingredient_name"]');
+      inputs[inputs.length - 1].focus();
+    }
+  }
+
+  document.getElementById('add-row').addEventListener('click', function () { addRow(true); });
+
+  // Remove a row; never let the table empty out completely.
+  tbody.addEventListener('click', function (e) {
+    if (e.target.classList.contains('use-suggestion')) {
+      var input = e.target.closest('tr').querySelector('input[name="ingredient_name"]');
+      input.value = e.target.dataset.name;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      e.target.closest('.suggestion').remove();
+      return;
+    }
+    if (!e.target.classList.contains('row-remove')) return;
+    var row = e.target.closest('tr');
+    var note = row.nextElementSibling;
+    row.remove();
+    // Drop the document-wording line with the row it belongs to.
+    if (note && note.classList.contains('note-row')) note.remove();
+    if (!entryRows().length) addRow(false);
+    renumber();
+  });
+
+  // Enter moves to the next row instead of submitting a half-typed recipe.
+  tbody.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    if (e.target.name !== 'ingredient_name' && e.target.name !== 'ingredient_quantity') return;
+    e.preventDefault();
+    var row = e.target.closest('tr');
+    var next = row.nextElementSibling;
+    while (next && next.classList.contains('note-row')) next = next.nextElementSibling;
+    if (!next) addRow(true);
+    else next.querySelector('input[name="ingredient_name"]').focus();
+  });
+
+  // Picking a known ingredient fills in the unit it is normally issued in.
+  tbody.addEventListener('change', function (e) {
+    if (e.target.name !== 'ingredient_name') return;
+    var unit = unitOf[e.target.value.trim().toLowerCase()];
+    if (!unit) return;
+    var select = e.target.closest('tr').querySelector('select[name="ingredient_unit"]');
+    if (select) select.value = unit;
+  });
+
+  // The master list grows as recipes are entered, so the 20th recipe is far
+  // quicker to key in than the first - and "Onion"/"onion" stay one ingredient.
+  fetch('{{ url_for("api_ingredients") }}')
+    .then(function (r) { return r.json(); })
+    .then(function (items) {
+      items.forEach(function (item) {
+        var option = document.createElement('option');
+        option.value = item.name;
+        datalist.appendChild(option);
+        unitOf[item.name.toLowerCase()] = item.unit;
+      });
+    })
+    .catch(function () { /* autocomplete is a convenience, not a requirement */ });
+
+  if (!entryRows().length) { addRow(false); addRow(false); addRow(false); }
+  renumber();
+})();
+</script>
+{% endblock %}
