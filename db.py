@@ -7,6 +7,7 @@ online backup API so the copy is consistent).
 
 import os
 import sqlite3
+from contextlib import contextmanager
 
 from flask import g
 from werkzeug.security import generate_password_hash
@@ -50,6 +51,13 @@ def get_db():
 def close_db(exception=None):  # noqa: ARG001 - Flask passes the exception
     db = g.pop("db", None)
     if db is not None:
+        # Multi-step writers use transaction(); a leftover open transaction on
+        # an exceptional path is discarded so half-applied state never lands.
+        if exception is not None:
+            try:
+                db.rollback()
+            except sqlite3.Error:
+                pass
         db.close()
 
 
@@ -101,13 +109,48 @@ def query(sql, args=(), one=False):
 
 
 def execute(sql, args=()):
-    """Run a write and commit. Returns lastrowid."""
+    """Run a write. Does not commit.
+
+    Single-statement callers must call commit() afterwards. Multi-step writers
+    (recipe replace, requisition freeze) must use transaction() so a failure
+    mid-loop cannot leave a half-applied dish or Store indent visible to other
+    Mess PCs under WAL.
+    """
     db = get_db()
     cur = db.execute(sql, args)
-    db.commit()
     last_id = cur.lastrowid
     cur.close()
     return last_id
+
+
+def commit():
+    get_db().commit()
+
+
+def rollback():
+    get_db().rollback()
+
+
+@contextmanager
+def transaction():
+    """Commit on success, roll back on any exception.
+
+    While the block runs, execute() does not auto-commit (it never does);
+    all statements share one SQLite transaction on the request connection.
+    """
+    try:
+        yield get_db()
+        get_db().commit()
+    except Exception:
+        get_db().rollback()
+        raise
+
+
+def _ingredient_id_by_name(conn, name):
+    row = conn.execute(
+        "SELECT id FROM ingredients WHERE name = ?", (name,)
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def get_or_create_ingredient(name, default_unit, conn=None):
@@ -120,23 +163,36 @@ def get_or_create_ingredient(name, default_unit, conn=None):
     `conn` lets callers outside a Flask request - the document importer's CLI -
     reuse this resolution instead of writing their own, which would be the one
     place a second spelling of "Onion" could creep into the master list.
+
+    Concurrent staff can introduce the same new name at once; the UNIQUE
+    constraint is the source of truth, and IntegrityError falls back to SELECT.
     """
     name = name.strip()
-
     if conn is None:
-        row = query("SELECT id FROM ingredients WHERE name = ?", (name,), one=True)
-        if row:
-            return row["id"]
-        return execute(
+        conn = get_db()
+
+    existing = _ingredient_id_by_name(conn, name)
+    if existing is not None:
+        return existing
+
+    # SAVEPOINT so a UNIQUE conflict with a concurrent first-insert only rolls
+    # back this statement group — not the ambient recipe/requisition transaction.
+    # Without it, IntegrityError leaves the connection mid-transaction on an old
+    # snapshot and a plain re-SELECT can still miss the peer's committed row.
+    conn.execute("SAVEPOINT sp_get_or_create_ingredient")
+    try:
+        cur = conn.execute(
             "INSERT INTO ingredients (name, default_unit) VALUES (?, ?)",
             (name, default_unit),
         )
-
-    row = conn.execute("SELECT id FROM ingredients WHERE name = ?", (name,)).fetchone()
-    if row:
-        return row["id"]
-    cur = conn.execute(
-        "INSERT INTO ingredients (name, default_unit) VALUES (?, ?)",
-        (name, default_unit),
-    )
-    return cur.lastrowid
+        conn.execute("RELEASE SAVEPOINT sp_get_or_create_ingredient")
+        # Caller owns the commit: web paths use transaction()/commit(); the CLI
+        # passes conn and commits once after the whole load.
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.execute("ROLLBACK TO SAVEPOINT sp_get_or_create_ingredient")
+        conn.execute("RELEASE SAVEPOINT sp_get_or_create_ingredient")
+        existing = _ingredient_id_by_name(conn, name)
+        if existing is not None:
+            return existing
+        raise

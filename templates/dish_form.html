@@ -25,7 +25,14 @@
   </p>
 </div>
 {% else %}
-<h1>{% if dish and dish.id %}Edit recipe{% else %}Add recipe{% endif %}</h1>
+<div class="page-head">
+  <h1>{% if dish and dish.id %}Edit recipe{% else %}Add recipe{% endif %}</h1>
+  {% if not (dish and dish.id) %}
+  <div class="btn-row">
+    <a href="{{ url_for('dish_import') }}" class="btn ghost">Import from document</a>
+  </div>
+  {% endif %}
+</div>
 {% endif %}
 
 <form method="post" class="panel"

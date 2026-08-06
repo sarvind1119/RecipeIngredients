@@ -72,7 +72,7 @@ by hiding buttons.
 
 ## Day-to-day use
 
-**Adding a recipe** (Admin) — *Recipes → Add recipe*. Enter the dish name, the
+**Adding a recipe** — *Recipes → Add recipe*. Enter the dish name, the
 number of persons the recipe as written serves, and the ingredients. Press
 **Enter** in an ingredient row to jump to the next one. Ingredient names
 autocomplete from those already entered, so recipes get quicker to key in as the

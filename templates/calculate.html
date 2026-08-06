@@ -83,8 +83,7 @@
 </script>
 {% else %}
   <p class="empty">No recipes are on record yet.
-    {% if is_admin %}<a href="{{ url_for('dish_new') }}">Add the first one</a>.
-    {% else %}Ask an administrator to add one.{% endif %}
+    <a href="{{ url_for('dish_new') }}">Add the first one</a>.
   </p>
 {% endif %}
 {% endblock %}

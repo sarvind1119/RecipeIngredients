@@ -119,7 +119,7 @@ ingredient consolidation possible later without a migration.
 The department supplies recipes as prose in Word documents, and also as digital
 PDFs, scans, photographs and typed spreadsheets.
 
-**In the app** (admin only): Recipes → *Import from document* → upload → each
+**In the app** (any logged-in user): Recipes → *Import from document* → upload → each
 recipe appears in the ordinary Add-recipe form, pre-filled, with unreadable rows
 highlighted and the document's own wording shown beneath them.
 
@@ -150,16 +150,16 @@ than defaulted to `kg` there for the same reason — the form's `<select>` can
 never post one, but an edited spreadsheet can, and "2-inch ginger" silently
 becoming a 2 kg indent is exactly the failure this system exists to prevent.
 
-**The Claude fallback is a bonus, never a dependency.** It re-reads only the
-lines the rules parser flagged, and only pages OCR was not confident about. With
-no API key the importer still runs and those lines stay flagged. Its schema
-makes quantity nullable so the model can answer "not stated" rather than produce
-a plausible number, and every row it produced is marked `source=llm` on the
-review sheet.
+**The Groq AI fallback is a bonus, never a dependency.** Set `GROQ_API_KEY` in
+`recipe_import/.env` (loaded by `app.py` and `recipe_import.llm`). Photos,
+scans and handwriting are read **vision-first** via Groq; Word/PDF text still
+uses the rules parser, with Groq only for flagged lines. With no API key the
+importer still runs and hard lines stay flagged. Quantity is nullable so the
+model answers "not stated" rather than inventing a figure; every AI row is
+`source=llm` on the review sheet.
 
-**PaddleOCR output is not trusted straight through.** OCR turns `100g` into
-`1OOg`; below `llm.OCR_CONFIDENCE_FLOOR` the page image is re-read by Claude
-vision instead. This is why `extract.py` keeps the page image alongside the text.
+**PaddleOCR is optional offline fallback only.** Prefer Groq vision for images.
+`extract.py` still keeps the page image so vision can re-read it.
 
 Recipe splitting matters: documents routinely hold several recipes (the sample
 holds two), so assuming one per file would merge two dishes into a single indent.

@@ -1,7 +1,6 @@
 # Recipe document importer only. Deliberately NOT in requirements.txt: the Mess
-# PC that serves the app should not have to install PaddlePaddle (several
-# hundred MB) to run a Flask server. Install this only on the machine that
-# converts the department's documents.
+# host that only serves the app does not need PDF/OCR stacks. Install this on
+# the machine that converts the department's documents (and hosts import):
 #
 #     pip install -r requirements-import.txt
 
@@ -9,12 +8,13 @@
 # openpyxl, which requirements.txt already installs for the Excel export.
 pdfplumber
 
-# Claude fallback for lines the rules parser cannot settle, and for scans OCR
-# was not confident about. Optional - without it those lines stay flagged.
-anthropic
-
-# Offline OCR for scans and photographs. The heaviest item here by far; skip
-# both lines if the department only ever sends digital documents.
-paddleocr
-paddlepaddle
+# Groq vision/text for photos, scans, handwriting, and flagged lines.
+# Requires GROQ_API_KEY in recipe_import/.env (or the process environment).
+groq
+python-dotenv
 pillow
+
+# Offline OCR for scans when Groq is unavailable. Optional and heavy — skip
+# both lines if you always use Groq vision for images.
+# paddleocr
+# paddlepaddle

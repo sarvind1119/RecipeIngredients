@@ -11,8 +11,15 @@
     </p>
   </div>
   <div class="btn-row">
+    {% if dish.is_active %}
     <a href="{{ url_for('calculate') }}?dish_id={{ dish.id }}" class="btn primary">Calculate</a>
-    {% if is_admin %}<a href="{{ url_for('dish_edit', dish_id=dish.id) }}" class="btn">Edit</a>{% endif %}
+    <a href="{{ url_for('dish_edit', dish_id=dish.id) }}" class="btn">Edit</a>
+    {% else %}
+    <form method="post" action="{{ url_for('dish_restore', dish_id=dish.id) }}">
+      <button type="submit" class="btn primary">Restore to active list</button>
+    </form>
+    <a href="{{ url_for('dish_edit', dish_id=dish.id) }}" class="btn">Edit</a>
+    {% endif %}
   </div>
 </div>
 

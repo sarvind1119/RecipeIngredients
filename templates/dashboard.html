@@ -21,8 +21,8 @@
 
 <div class="cta-row">
   <a href="{{ url_for('calculate') }}" class="btn primary large">Calculate ingredient requirement</a>
+  <a href="{{ url_for('dish_new') }}" class="btn large">Add a new recipe</a>
   {% if is_admin %}
-    <a href="{{ url_for('dish_new') }}" class="btn large">Add a new recipe</a>
     <a href="{{ url_for('admin_backup') }}" class="btn large">Download backup</a>
   {% endif %}
 </div>
@@ -55,7 +55,7 @@
   {% else %}
     <p class="empty">No requirements generated yet.
       {% if dish_count %}<a href="{{ url_for('calculate') }}">Calculate one now</a>.
-      {% else %}Start by {% if is_admin %}<a href="{{ url_for('dish_new') }}">adding a recipe</a>{% else %}asking an administrator to add a recipe{% endif %}.{% endif %}
+      {% else %}Start by <a href="{{ url_for('dish_new') }}">adding a recipe</a>.{% endif %}
     </p>
   {% endif %}
 </div>

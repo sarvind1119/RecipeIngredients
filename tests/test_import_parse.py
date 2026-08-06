@@ -16,7 +16,16 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recipe_import.extract import is_importable, split_recipes  # noqa: E402
+from recipe_import.extract import (  # noqa: E402
+    is_importable,
+    read_csv,
+    read_excel,
+    split_recipes,
+    _map_columns,
+    _find_header_row,
+    _split_qty_unit_fields,
+)
+from recipe_import.cli import _row_from_sheet, build_recipes  # noqa: E402
 from recipe_import.normalise import (  # noqa: E402
     clean_name,
     normalise_text,
@@ -299,3 +308,109 @@ class TestSharedValidation:
         rows, errors = validate_ingredient_rows(["Paneer"], [1.0], ["kg"])
         assert errors == []
         assert rows == [{"name": "Paneer", "quantity": 1.0, "unit": "kg"}]
+
+
+class TestSpreadsheetImport:
+    """Excel/CSV column mapping — mess sheets use many heading spellings."""
+
+    def test_csv_with_standard_headers(self, tmp_path):
+        path = tmp_path / "biryani.csv"
+        path.write_text(
+            "Dish,Ingredient,Qty,Unit,Persons\n"
+            "Chicken Biryani,Chicken,3,kg,10\n"
+            "Chicken Biryani,Basmati Rice,2,kg,10\n"
+            "Chicken Biryani,Ghee,500,g,10\n",
+            encoding="utf-8",
+        )
+        recipes = read_csv(str(path))
+        assert len(recipes) == 1
+        assert recipes[0].dish_name == "Chicken Biryani"
+        assert recipes[0].base_persons == "10"
+        assert len(recipes[0].sheet_rows) == 3
+
+        rows = [_row_from_sheet(r) for r in recipes[0].sheet_rows]
+        assert all(r.is_ok for r in rows)
+        assert {r.name for r in rows} >= {"Chicken", "Basmati Rice", "Ghee"}
+
+    def test_csv_qty_and_unit_combined_in_one_cell(self, tmp_path):
+        path = tmp_path / "simple.csv"
+        path.write_text(
+            "Item,Quantity\n"
+            "Onion,1.5 kg\n"
+            "Salt,100g\n"
+            "Eggs,12 nos\n",
+            encoding="utf-8",
+        )
+        recipes = read_csv(str(path))
+        assert len(recipes) == 1
+        rows = [_row_from_sheet(r) for r in recipes[0].sheet_rows]
+        by_name = {r.name: r for r in rows}
+        assert by_name["Onion"].quantity == 1.5 and by_name["Onion"].unit == "kg"
+        assert by_name["Salt"].quantity == 100.0 and by_name["Salt"].unit == "g"
+        assert by_name["Eggs"].quantity == 12.0 and by_name["Eggs"].unit == "nos"
+
+    def test_excel_messy_headers(self, tmp_path):
+        from openpyxl import Workbook
+
+        path = tmp_path / "mess.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Paneer Bhurji"
+        ws.append(["S.No", "Name of Ingredient", "Qty Required", "UOM"])
+        ws.append([1, "Paneer", 2, "kg"])
+        ws.append([2, "Onion", "1.5", "kg"])
+        ws.append([3, "Tomato", 500, "gm"])
+        wb.save(path)
+
+        recipes = read_excel(str(path))
+        assert len(recipes) == 1
+        assert "Paneer" in (recipes[0].dish_name or ws.title)
+        rows = [_row_from_sheet(r) for r in recipes[0].sheet_rows]
+        assert len(rows) == 3
+        assert all(r.is_ok for r in rows)
+        tomato = next(r for r in rows if r.name == "Tomato")
+        assert tomato.quantity == 500.0 and tomato.unit == "g"
+
+    def test_two_dishes_in_one_csv(self, tmp_path):
+        path = tmp_path / "menu.csv"
+        path.write_text(
+            "Recipe Name,Particulars,Amount,Unit\n"
+            "Dal Tadka,Arhar Dal,2,kg\n"
+            "Dal Tadka,Ghee,100,g\n"
+            "Jeera Rice,Basmati Rice,3,kg\n"
+            "Jeera Rice,Jeera,50,g\n",
+            encoding="utf-8",
+        )
+        recipes = read_csv(str(path))
+        assert len(recipes) == 2
+        names = {r.dish_name for r in recipes}
+        assert "Dal Tadka" in names and "Jeera Rice" in names
+
+    def test_header_aliases_map_qty_required(self):
+        header = ("S.No", "Name of Ingredient", "Qty Required", "UOM")
+        mapping = _map_columns(header)
+        assert mapping["ingredient_name"] == 1
+        assert mapping["quantity"] == 2
+        assert mapping["unit"] == 3
+
+    def test_split_qty_unit_fields(self):
+        record = {"quantity": "2.5 kg", "unit": ""}
+        _split_qty_unit_fields(record)
+        assert record["quantity"] == "2.5"
+        assert record["unit"] == "kg"
+
+    def test_csv_is_importable(self):
+        assert is_importable("menu.csv")
+        assert is_importable("menu.CSV")
+        assert is_importable("stock.xlsx")
+
+    def test_build_recipes_from_csv_skips_llm_need(self, tmp_path):
+        path = tmp_path / "ok.csv"
+        path.write_text(
+            "Ingredient,Qty,Unit\nChicken,3,kg\nRice,2,kg\n",
+            encoding="utf-8",
+        )
+        recipes = build_recipes([str(path)], use_llm=False)
+        assert len(recipes) == 1
+        assert len(recipes[0].rows) == 2
+        assert all(r.is_ok for r in recipes[0].rows)

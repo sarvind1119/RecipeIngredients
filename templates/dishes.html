@@ -4,12 +4,10 @@
 {% block content %}
 <div class="page-head">
   <h1>Recipes</h1>
-  {% if is_admin %}
+  <div class="btn-row">
     <a href="{{ url_for('dish_new') }}" class="btn primary">Add recipe</a>
-    {% if is_admin and import_available %}
     <a href="{{ url_for('dish_import') }}" class="btn ghost">Import from document</a>
-    {% endif %}
-  {% endif %}
+  </div>
 </div>
 
 <form method="get" class="filter-bar">
@@ -41,13 +39,11 @@
       <td class="num">{{ counts.get(d.id, 0) }}</td>
       <td class="actions">
         <a href="{{ url_for('calculate') }}?dish_id={{ d.id }}" class="link-sm">Calculate</a>
-        {% if is_admin %}
-          <a href="{{ url_for('dish_edit', dish_id=d.id) }}" class="link-sm">Edit</a>
-          <form method="post" action="{{ url_for('dish_delete', dish_id=d.id) }}"
-                onsubmit="return confirm('Remove {{ d.name }} from the active recipe list? Past requisitions are kept.');">
-            <button type="submit" class="link-sm danger">Remove</button>
-          </form>
-        {% endif %}
+        <a href="{{ url_for('dish_edit', dish_id=d.id) }}" class="link-sm">Edit</a>
+        <form method="post" action="{{ url_for('dish_delete', dish_id=d.id) }}"
+              onsubmit="return confirm('Remove {{ d.name }} from the active recipe list? Past requisitions are kept.');">
+          <button type="submit" class="link-sm danger">Remove</button>
+        </form>
       </td>
     </tr>
     {% endfor %}

@@ -123,13 +123,22 @@ class TestPasswordGate:
 
 
 class TestRoles:
-    def test_staff_cannot_create_a_recipe(self, staff):
-        assert staff.post("/dishes/new", data=BIRYANI).status_code == 403
+    def test_staff_can_create_a_recipe(self, staff):
+        r = staff.post("/dishes/new", data=BIRYANI, follow_redirects=True)
+        assert r.status_code == 200
+        assert b"Chicken Biryani" in r.data
 
-    def test_staff_cannot_edit_or_delete(self, admin, staff):
+    def test_staff_can_edit_and_delete(self, admin, staff):
         admin.post("/dishes/new", data=BIRYANI)
-        assert staff.post("/dishes/1/edit", data=BIRYANI).status_code == 403
-        assert staff.post("/dishes/1/delete").status_code == 403
+        amended = dict(BIRYANI)
+        amended["name"] = "Chicken Biryani (staff edit)"
+        r = staff.post("/dishes/1/edit", data=amended, follow_redirects=True)
+        assert r.status_code == 200
+        assert b"staff edit" in r.data
+        assert staff.post("/dishes/1/delete", follow_redirects=True).status_code == 200
+
+    def test_staff_cannot_manage_users(self, staff):
+        assert staff.get("/users").status_code == 403
 
     def test_staff_cannot_download_the_backup(self, staff):
         assert staff.get("/admin/backup").status_code == 403
@@ -289,6 +298,153 @@ class TestSnapshotIntegrity:
         assert b"Chicken Biryani" not in admin.get("/dishes").data
 
 
+class TestSoftDeleteLifecycle:
+    def test_soft_deleted_name_can_be_reclaimed_by_readding(self, admin):
+        admin.post("/dishes/new", data=BIRYANI)
+        admin.post("/dishes/1/delete")
+
+        # Active-list clash no longer blocks; UNIQUE name is reclaimed on the
+        # same dish_id so past requisitions stay linked to one recipe row.
+        r = admin.post("/dishes/new", data=BIRYANI, follow_redirects=True)
+        assert b"saved" in r.data
+
+        conn = db.connect()
+        rows = conn.execute(
+            "SELECT id, is_active FROM dishes WHERE name = 'Chicken Biryani'"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        assert rows[0]["id"] == 1
+        assert rows[0]["is_active"] == 1
+
+    def test_restore_endpoint_reactivates_a_removed_dish(self, admin):
+        admin.post("/dishes/new", data=BIRYANI)
+        admin.post("/dishes/1/delete")
+        # Flash text mentions the name; the active list table must not.
+        list_html = admin.get("/dishes").data.decode()
+        assert 'href="/dishes/1"' not in list_html
+        assert "No recipes recorded yet." in list_html
+
+        r = admin.post("/dishes/1/restore", follow_redirects=True)
+        assert b"restored" in r.data
+        list_html = admin.get("/dishes").data.decode()
+        assert 'href="/dishes/1"' in list_html
+        assert "Chicken Biryani" in list_html
+
+    def test_calculate_rejects_soft_deleted_dish(self, admin):
+        admin.post("/dishes/new", data=BIRYANI)
+        admin.post("/dishes/1/delete")
+
+        r = admin.post(
+            "/calculate",
+            data={
+                "dish_id": "1",
+                "persons_required": "90",
+                "meal_type": "Lunch",
+                "meal_date": "2026-08-10",
+            },
+            follow_redirects=True,
+        )
+        assert b"select a dish" in r.data.lower() or b"Please select a dish" in r.data
+
+        conn = db.connect()
+        count = conn.execute("SELECT COUNT(*) FROM requisitions").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+
+class TestTransactionalWrites:
+    def test_failed_ingredient_insert_does_not_leave_an_empty_dish(self, admin, monkeypatch):
+        """Recipe replace must roll back if a later write fails mid-loop."""
+        admin.post("/dishes/new", data=BIRYANI)
+
+        real_execute = db.execute
+        calls = {"n": 0}
+
+        def flaky_execute(sql, args=()):
+            # After the dish UPDATE and DELETE dish_ingredients, fail on the
+            # first dish_ingredients INSERT so a non-transactional path would
+            # leave the recipe empty.
+            if "INSERT INTO dish_ingredients" in sql:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise sqlite3.OperationalError("simulated mid-save failure")
+            return real_execute(sql, args)
+
+        monkeypatch.setattr(db, "execute", flaky_execute)
+
+        amended = dict(BIRYANI)
+        amended["ingredient_quantity"] = ["3.5", "2", "1.5", "500", "100", "5"]
+        with pytest.raises(sqlite3.OperationalError):
+            admin.post("/dishes/1/edit", data=amended)
+
+        conn = db.connect()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM dish_ingredients WHERE dish_id = 1"
+        ).fetchone()[0]
+        chicken = conn.execute(
+            """SELECT di.quantity FROM dish_ingredients di
+                 JOIN ingredients i ON i.id = di.ingredient_id
+                WHERE di.dish_id = 1 AND i.name = 'Chicken'"""
+        ).fetchone()
+        conn.close()
+        # Original six rows still present; chicken still 3 kg, not half-edited.
+        assert count == 6
+        assert chicken["quantity"] == 3.0
+
+    def test_failed_requisition_item_insert_leaves_no_partial_requisition(
+        self, admin, monkeypatch
+    ):
+        admin.post("/dishes/new", data=BIRYANI)
+
+        real_execute = db.execute
+
+        def flaky_execute(sql, args=()):
+            if "INSERT INTO requisition_items" in sql:
+                raise sqlite3.OperationalError("simulated mid-requisition failure")
+            return real_execute(sql, args)
+
+        monkeypatch.setattr(db, "execute", flaky_execute)
+
+        with pytest.raises(sqlite3.OperationalError):
+            admin.post(
+                "/calculate",
+                data={
+                    "dish_id": "1",
+                    "persons_required": "90",
+                    "meal_type": "Lunch",
+                    "meal_date": "2026-08-10",
+                },
+            )
+
+        conn = db.connect()
+        assert conn.execute("SELECT COUNT(*) FROM requisitions").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM requisition_items").fetchone()[0] == 0
+        conn.close()
+
+
+class TestIngredientRace:
+    def test_get_or_create_recovers_from_unique_race(self, application, monkeypatch):
+        """When the first SELECT misses a concurrent insert, IntegrityError re-resolves."""
+        with application.app_context():
+            first = db.get_or_create_ingredient("Cardamom", "g")
+            db.commit()
+
+            real_lookup = db._ingredient_id_by_name
+            state = {"missed": False}
+
+            def miss_once(conn, name):
+                if not state["missed"] and name.casefold() == "cardamom":
+                    state["missed"] = True
+                    return None
+                return real_lookup(conn, name)
+
+            monkeypatch.setattr(db, "_ingredient_id_by_name", miss_once)
+            again = db.get_or_create_ingredient("Cardamom", "kg")
+            assert again == first
+            assert state["missed"] is True
+
+
 class TestExports:
     @pytest.fixture(autouse=True)
     def _requisition(self, admin):
@@ -432,11 +588,20 @@ class TestDocumentImportUI:
         import app as appmod
 
         monkeypatch.setattr(appmod, "_load_importer", lambda: None)
+        monkeypatch.setattr(appmod, "importer_available", lambda: False)
+        monkeypatch.setattr(
+            appmod,
+            "importer_error_message",
+            lambda: "Recipe import is not installed on this PC.",
+        )
 
         assert appmod.importer_available() is False
         assert admin.get("/dishes").status_code == 200
-        assert b"Import from document" not in admin.get("/dishes").data
-        assert admin.get("/dishes/import").status_code == 404
+        # Button stays visible so admins can open the page and see install help.
+        assert b"Import from document" in admin.get("/dishes").data
+        blocked = admin.get("/dishes/import")
+        assert blocked.status_code == 503
+        assert b"not available" in blocked.data
         assert admin.get("/dishes/import/review").status_code == 404
 
     def test_import_page_is_offered_when_the_importer_is_present(self, admin):
@@ -444,10 +609,10 @@ class TestDocumentImportUI:
         assert b"Import from document" in admin.get("/dishes").data
         assert admin.get("/dishes/import").status_code == 200
 
-    def test_staff_cannot_reach_the_importer(self, staff):
+    def test_staff_can_reach_the_importer(self, staff):
         pytest.importorskip("recipe_import")
-        assert staff.get("/dishes/import").status_code == 403
-        assert staff.post("/dishes/import/cancel").status_code == 403
+        assert staff.get("/dishes/import").status_code == 200
+        assert staff.post("/dishes/import/cancel", follow_redirects=True).status_code == 200
 
     def test_a_document_is_parsed_into_a_prefilled_form(self, admin):
         pytest.importorskip("recipe_import")
@@ -495,6 +660,78 @@ class TestDocumentImportUI:
         conn = db.connect()
         assert conn.execute("SELECT COUNT(*) FROM dishes").fetchone()[0] == 0
         conn.close()
+
+    def test_import_validation_rerender_keeps_document_annotations(self, admin):
+        """A bad field must not strip status/source_line from the import form."""
+        pytest.importorskip("recipe_import")
+        import json
+        import app as appmod
+
+        token = "testimporttoken1"
+        payload = [
+            {
+                "dish_name": "Amritsari Paneer Bhurji",
+                "base_persons": None,
+                "category": "Main Course",
+                "source_file": "sample.docx",
+                "rows": [
+                    {
+                        "name": "Paneer",
+                        "quantity": 1,
+                        "unit": "kg",
+                        "status": "ok",
+                        "note": "",
+                        "source_line": "1 kg Paneer",
+                        "suggested_name": "",
+                    },
+                    {
+                        "name": "Ginger",
+                        "quantity": 2,
+                        "unit": "",
+                        "status": "unit_unconvertible",
+                        "note": "length, not a store unit",
+                        "source_line": "2-inch ginger",
+                        "suggested_name": "",
+                    },
+                ],
+            }
+        ]
+        path = appmod._import_store_path(token)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+
+        with admin.session_transaction() as sess:
+            sess["import_token"] = token
+            sess["import_index"] = 0
+
+        response = admin.post(
+            "/dishes/new",
+            data={
+                "name": "Amritsari Paneer Bhurji",
+                "category": "Main Course",
+                "base_persons": "100",
+                "import_next": "1",
+                "ingredient_name": ["Paneer", "Ginger"],
+                "ingredient_quantity": ["1", "2"],
+                "ingredient_unit": ["kg", ""],
+            },
+            follow_redirects=True,
+        )
+
+        body = response.data.decode()
+        assert "is not a recognised unit" in body
+        # Flagged row and the document's own wording must still be on screen.
+        assert "Ginger" in body
+        assert "2-inch ginger" in body
+        assert "length, not a store unit" in body
+        assert "needs-attention" in body
+        assert "could not be" in body  # flagged banner still counts rows
+
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     def test_a_recipe_with_no_serving_count_is_refused(self, admin):
         pytest.importorskip("recipe_import")

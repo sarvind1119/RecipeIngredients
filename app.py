@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import tempfile
 from datetime import date
 from functools import wraps
@@ -41,6 +42,48 @@ from scaling import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SECRET_KEY_FILE = os.path.join(BASE_DIR, ".secret_key")
+
+
+def _load_dotenv():
+    """Load GROQ_API_KEY and friends from .env files.
+
+    Does not import recipe_import (that package stays optional and lazy). Tries
+    python-dotenv when installed, otherwise a minimal KEY=VALUE parse.
+    """
+    paths = (
+        os.path.join(BASE_DIR, ".env"),
+        os.path.join(BASE_DIR, "recipe_import", ".env"),
+    )
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        load_dotenv = None
+
+    if load_dotenv is not None:
+        for path in paths:
+            if os.path.isfile(path):
+                load_dotenv(path, override=False)
+        return
+
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key, value = key.strip(), value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+        except OSError:
+            continue
+
+
+_load_dotenv()
+
 # 5002 by default, avoiding the 5001 used by ../Live_Demo_App. This is the port
 # the Mess PCs are told to use, so run_app.bat sets nothing and gets it. PORT is
 # read from the environment only so a second instance can be started alongside
@@ -173,6 +216,7 @@ def change_password():
                 "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
                 (generate_password_hash(new), session["user_id"]),
             )
+            db.commit()
             session["must_change_password"] = False
             flash("Password updated.", "success")
             return redirect(url_for("dashboard"))
@@ -271,7 +315,7 @@ def _parse_ingredient_rows(form):
 
 
 @app.route("/dishes/new", methods=["GET", "POST"])
-@admin_required
+@login_required
 def dish_new():
     if request.method == "POST":
         return _save_dish(None)
@@ -285,7 +329,7 @@ def dish_new():
 
 
 @app.route("/dishes/<int:dish_id>/edit", methods=["GET", "POST"])
-@admin_required
+@login_required
 def dish_edit(dish_id):
     dish = db.query("SELECT * FROM dishes WHERE id = ?", (dish_id,), one=True)
     if dish is None:
@@ -325,21 +369,33 @@ def _save_dish(dish_id):
     if not rows:
         errors.append("At least one ingredient with a quantity is required.")
 
+    # Soft-deleted dishes still hold the UNIQUE name. Clash only among active
+    # recipes; creating under a removed name reclaims that row (same dish_id
+    # so past requisitions stay linked). Editing onto another dish's removed
+    # name is refused — restore or rename that row first.
+    reclaim_id = None
     if name:
-        clash_sql = "SELECT id FROM dishes WHERE name = ?"
-        clash_args = [name]
-        if dish_id:
-            clash_sql += " AND id != ?"
-            clash_args.append(dish_id)
-        if db.query(clash_sql, clash_args, one=True):
-            errors.append(f"A dish named '{name}' already exists.")
+        holder = db.query(
+            "SELECT id, is_active FROM dishes WHERE name = ?", (name,), one=True
+        )
+        if holder and holder["id"] != dish_id:
+            if holder["is_active"]:
+                errors.append(f"A dish named '{name}' already exists.")
+            elif dish_id is None:
+                reclaim_id = holder["id"]
+            else:
+                errors.append(
+                    f"A removed dish named '{name}' still exists. "
+                    "Restore it or pick another name."
+                )
 
     if errors:
         for message in errors:
             flash(message, "danger")
-        # Re-render with what they typed. Never make anyone key a whole recipe
-        # in twice because of one bad row - including mid-import, where losing
-        # the form would also lose their place in the document's queue.
+        # Re-render with what they typed, including invalid rows and import
+        # annotations (status / source_line / notes). Validated `rows` alone
+        # drops flagged lines and loses the document wording under them.
+        display_rows = _ingredients_for_form_rerender(request.form)
         return render_template(
             "dish_form.html",
             dish={
@@ -349,36 +405,43 @@ def _save_dish(dish_id):
                 "base_persons": base_persons_raw,
                 "notes": notes,
             },
-            ingredients=rows,
+            ingredients=display_rows,
             categories=DISH_CATEGORIES,
             units=UNITS,
-            import_ctx=_current_import_ctx(),
+            import_ctx=_current_import_ctx(display_rows),
         )
 
-    if dish_id:
-        db.execute(
-            """UPDATE dishes
-                  SET name = ?, category = ?, base_persons = ?, notes = ?,
-                      updated_at = datetime('now', 'localtime')
-                WHERE id = ?""",
-            (name, category, base_persons, notes, dish_id),
-        )
-        db.execute("DELETE FROM dish_ingredients WHERE dish_id = ?", (dish_id,))
-    else:
-        dish_id = db.execute(
-            """INSERT INTO dishes (name, category, base_persons, notes)
-               VALUES (?, ?, ?, ?)""",
-            (name, category, base_persons, notes),
-        )
+    # One transaction: UPDATE/DELETE/INSERTs must not leave a live dish with
+    # zero ingredients (or a half-written new dish) visible to other Mess PCs.
+    with db.transaction():
+        if dish_id is None and reclaim_id is not None:
+            dish_id = reclaim_id
 
-    for order, row in enumerate(rows):
-        ingredient_id = db.get_or_create_ingredient(row["name"], row["unit"])
-        db.execute(
-            """INSERT INTO dish_ingredients
-                   (dish_id, ingredient_id, quantity, unit, sort_order)
-               VALUES (?, ?, ?, ?, ?)""",
-            (dish_id, ingredient_id, row["quantity"], row["unit"], order),
-        )
+        if dish_id:
+            db.execute(
+                """UPDATE dishes
+                      SET name = ?, category = ?, base_persons = ?, notes = ?,
+                          is_active = 1,
+                          updated_at = datetime('now', 'localtime')
+                    WHERE id = ?""",
+                (name, category, base_persons, notes, dish_id),
+            )
+            db.execute("DELETE FROM dish_ingredients WHERE dish_id = ?", (dish_id,))
+        else:
+            dish_id = db.execute(
+                """INSERT INTO dishes (name, category, base_persons, notes)
+                   VALUES (?, ?, ?, ?)""",
+                (name, category, base_persons, notes),
+            )
+
+        for order, row in enumerate(rows):
+            ingredient_id = db.get_or_create_ingredient(row["name"], row["unit"])
+            db.execute(
+                """INSERT INTO dish_ingredients
+                       (dish_id, ingredient_id, quantity, unit, sort_order)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (dish_id, ingredient_id, row["quantity"], row["unit"], order),
+            )
 
     flash(f"Recipe for '{name}' saved.", "success")
 
@@ -391,6 +454,58 @@ def _save_dish(dish_id):
     return redirect(url_for("dish_detail", dish_id=dish_id))
 
 
+def _ingredients_for_form_rerender(form):
+    """Rebuild ingredient rows for re-display after validation failure.
+
+    Keeps every partially-filled row the admin posted (validated `rows` drop
+    bad units), and re-attaches import annotations from the parked queue by
+    form index so document wording and highlights survive one bad field.
+    """
+    names = form.getlist("ingredient_name")
+    quantities = form.getlist("ingredient_quantity")
+    units = form.getlist("ingredient_unit")
+
+    source_rows = []
+    if form.get("import_next"):
+        queue = _read_import_queue()
+        if queue:
+            index = session.get("import_index", 0)
+            if index < len(queue):
+                source_rows = queue[index].get("rows") or []
+
+    display = []
+    for idx in range(len(names)):
+        name = (names[idx] or "").strip()
+        qty_raw = (
+            str(quantities[idx]).strip()
+            if idx < len(quantities) and quantities[idx] is not None
+            else ""
+        )
+        unit = (
+            str(units[idx] or "").strip().lower()
+            if idx < len(units)
+            else ""
+        )
+        if not name and not qty_raw:
+            continue
+
+        quantity = None
+        if qty_raw:
+            try:
+                quantity = float(qty_raw)
+            except ValueError:
+                quantity = None
+
+        row = {"name": name, "quantity": quantity, "unit": unit}
+        if idx < len(source_rows):
+            src = source_rows[idx]
+            for key in ("status", "note", "source_line", "suggested_name"):
+                if key in src:
+                    row[key] = src[key]
+        display.append(row)
+    return display
+
+
 # --- Importing recipe documents -------------------------------------------
 #
 # recipe_import is an optional add-on, imported lazily inside these routes and
@@ -399,22 +514,67 @@ def _save_dish(dish_id):
 # the navigation hides the page, and the routes 404. The app must keep starting
 # without it, which tests/test_app.py asserts.
 
-IMPORT_UPLOAD_EXTENSIONS = {".docx", ".pdf", ".xlsx", ".xlsm",
-                            ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}
+IMPORT_UPLOAD_EXTENSIONS = {
+    ".docx", ".pdf", ".xlsx", ".xlsm", ".csv",
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp",
+}
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
 
 
+_importer_cli = None
+_importer_error = None
+
+
 def _load_importer():
-    """Return the importer's cli module, or None when it is not installed."""
+    """Return the importer's cli module, or None when it is not installed.
+
+    Successful loads are cached. Failures are not cached permanently so fixing
+    dependencies does not require a process restart to retry; the error text is
+    kept for the admin install-help page.
+    """
+    global _importer_cli, _importer_error
+    if _importer_cli is not None:
+        return _importer_cli
     try:
         from recipe_import import cli
-    except ImportError:
+        _importer_cli = cli
+        _importer_error = None
+        return cli
+    except Exception as exc:  # ImportError and load-time failures (missing dep)
+        _importer_error = str(exc)
+        print(f"  recipe_import unavailable: {exc}", file=sys.stderr)
         return None
-    return cli
 
 
 def importer_available():
     return _load_importer() is not None
+
+
+def importer_error_message():
+    """Why import is off, for admin UI — empty when available."""
+    if importer_available():
+        return ""
+    # Ensure we attempted a load so _importer_error is set when applicable.
+    _load_importer()
+    if _importer_error:
+        return (
+            "Recipe import could not start: "
+            f"{_importer_error}. "
+            "From the project folder run: pip install -r requirements-import.txt"
+        )
+    return (
+        "Recipe import is not installed on this PC. "
+        "Install with: pip install -r requirements-import.txt"
+    )
+
+
+def _ai_status():
+    """Whether Groq vision is ready (for the import page banner)."""
+    try:
+        from recipe_import import llm as llm_mod
+        return llm_mod.availability_status()
+    except Exception as exc:
+        return False, f"AI status unknown: {exc}"
 
 
 def _import_store_path(token):
@@ -438,7 +598,7 @@ def _read_import_queue():
         return None
 
 
-def _current_import_ctx():
+def _current_import_ctx(display_rows=None):
     """Import banner state for a form re-render, or None when not importing."""
     if not request.form.get("import_next"):
         return None
@@ -448,11 +608,17 @@ def _current_import_ctx():
     index = session.get("import_index", 0)
     if index >= len(queue):
         return None
+    if display_rows is not None:
+        flagged = sum(1 for r in display_rows if r.get("status", "ok") != "ok")
+    else:
+        flagged = sum(
+            1 for r in queue[index]["rows"] if r.get("status", "ok") != "ok"
+        )
     return {
         "position": index + 1,
         "total": len(queue),
         "source_file": queue[index]["source_file"],
-        "flagged": 0,  # the rows on screen are now what the admin typed
+        "flagged": flagged,
     }
 
 
@@ -467,25 +633,55 @@ def _clear_import_queue():
 
 
 @app.route("/dishes/import", methods=["GET", "POST"])
-@admin_required
+@login_required
 def dish_import():
     importer = _load_importer()
     if importer is None:
-        abort(404)
+        # Always reachable when the button is shown so it is not a dead mystery —
+        # explain how to install rather than a bare 404.
+        return render_template(
+            "dish_import.html",
+            import_blocked=True,
+            import_error=importer_error_message(),
+        ), 503
 
     if request.method == "GET":
-        return render_template("dish_import.html")
+        ai_ok, ai_status = _ai_status()
+        return render_template(
+            "dish_import.html",
+            import_blocked=False,
+            ai_ready=ai_ok,
+            ai_status=ai_status,
+        )
 
     upload = request.files.get("document")
     if upload is None or not upload.filename:
         flash("Choose a document to import.", "danger")
         return redirect(url_for("dish_import"))
 
-    filename = secure_filename(upload.filename)
+    original_name = upload.filename
+    filename = secure_filename(original_name)
+    # secure_filename can strip everything from odd phone names; keep a usable
+    # fallback and always preserve the original extension when possible.
+    orig_ext = os.path.splitext(original_name)[1].lower()
+    if not filename or filename in {".", ".."}:
+        filename = f"upload{orig_ext or '.bin'}"
+    elif orig_ext and not os.path.splitext(filename)[1]:
+        filename = filename + orig_ext
+
     extension = os.path.splitext(filename)[1].lower()
     if extension not in IMPORT_UPLOAD_EXTENSIONS:
-        flash(f"'{extension or filename}' is not a document type the importer reads.", "danger")
+        flash(
+            f"'{extension or original_name}' is not a document type the importer reads. "
+            "Use Word, PDF, Excel, PNG, JPG, or WEBP (not HEIC — convert first).",
+            "danger",
+        )
         return redirect(url_for("dish_import"))
+
+    use_llm = request.form.get("use_llm") == "on"
+    # Photos need AI; if the box was unticked but Groq is ready, still use it.
+    if extension in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}:
+        use_llm = True
 
     with tempfile.TemporaryDirectory() as workdir:
         saved = os.path.join(workdir, filename)
@@ -495,18 +691,33 @@ def dish_import():
             flash("That file is larger than 25 MB.", "danger")
             return redirect(url_for("dish_import"))
 
+        warnings = []
         try:
             recipes = importer.build_recipes(
                 [saved],
-                use_llm=request.form.get("use_llm") == "on",
+                use_llm=use_llm,
                 known_names=[r["name"] for r in db.query("SELECT name FROM ingredients")],
+                collect_warnings=warnings,
             )
         except Exception as exc:  # a bad document must not 500 the app
             flash(f"Could not read that document: {exc}", "danger")
             return redirect(url_for("dish_import"))
 
+    for note in warnings:
+        flash(note, "warning")
+
     if not recipes:
         flash("No recipes were found in that document.", "warning")
+        return redirect(url_for("dish_import"))
+
+    total_rows = sum(len(r.rows) for r in recipes)
+    if total_rows == 0:
+        flash(
+            "The file opened but no ingredients were read. For photos/handwriting, "
+            "check GROQ_API_KEY in recipe_import/.env, that the groq package is "
+            "installed, and that the image is a clear full-page shot.",
+            "danger",
+        )
         return redirect(url_for("dish_import"))
 
     token = secrets.token_urlsafe(16)
@@ -550,7 +761,7 @@ def dish_import():
 
 
 @app.route("/dishes/import/review")
-@admin_required
+@login_required
 def dish_import_review():
     """Show the next parsed recipe in the ordinary Add-recipe form.
 
@@ -596,7 +807,7 @@ def dish_import_review():
 
 
 @app.route("/dishes/import/skip", methods=["POST"])
-@admin_required
+@login_required
 def dish_import_skip():
     if not importer_available():
         abort(404)
@@ -605,7 +816,7 @@ def dish_import_skip():
 
 
 @app.route("/dishes/import/cancel", methods=["POST"])
-@admin_required
+@login_required
 def dish_import_cancel():
     _clear_import_queue()
     flash("Import abandoned. Nothing was saved.", "info")
@@ -613,17 +824,56 @@ def dish_import_cancel():
 
 
 @app.route("/dishes/<int:dish_id>/delete", methods=["POST"])
-@admin_required
+@login_required
 def dish_delete(dish_id):
     dish = db.query("SELECT * FROM dishes WHERE id = ?", (dish_id,), one=True)
     if dish is None:
         abort(404)
     # Soft delete only. Past requisitions reference this row, and the Store's
-    # historical record must keep resolving.
+    # historical record must keep resolving. The name stays reserved so a
+    # later "Add recipe" with the same title reclaims this dish_id rather than
+    # creating a parallel row.
     db.execute("UPDATE dishes SET is_active = 0 WHERE id = ?", (dish_id,))
+    db.commit()
     flash(f"'{dish['name']}' removed from the active list. Past requisitions are unaffected.",
           "success")
     return redirect(url_for("dishes"))
+
+
+@app.route("/dishes/<int:dish_id>/restore", methods=["POST"])
+@login_required
+def dish_restore(dish_id):
+    """Put a soft-deleted dish back on the active list."""
+    dish = db.query("SELECT * FROM dishes WHERE id = ?", (dish_id,), one=True)
+    if dish is None:
+        abort(404)
+    if dish["is_active"]:
+        flash(f"'{dish['name']}' is already on the active list.", "info")
+        return redirect(url_for("dish_detail", dish_id=dish_id))
+
+    # UNIQUE name is global; only another active row could block restore, and
+    # that should be impossible while this inactive row still holds the name.
+    clash = db.query(
+        "SELECT id FROM dishes WHERE name = ? AND is_active = 1 AND id != ?",
+        (dish["name"], dish_id),
+        one=True,
+    )
+    if clash:
+        flash(
+            f"Cannot restore '{dish['name']}': an active dish already uses that name.",
+            "danger",
+        )
+        return redirect(url_for("dish_detail", dish_id=dish_id))
+
+    db.execute(
+        """UPDATE dishes
+              SET is_active = 1, updated_at = datetime('now', 'localtime')
+            WHERE id = ?""",
+        (dish_id,),
+    )
+    db.commit()
+    flash(f"'{dish['name']}' restored to the active list.", "success")
+    return redirect(url_for("dish_detail", dish_id=dish_id))
 
 
 @app.route("/api/ingredients")
@@ -659,7 +909,13 @@ def calculate():
         errors = []
         dish = None
         if dish_id:
-            dish = db.query("SELECT * FROM dishes WHERE id = ?", (dish_id,), one=True)
+            # Soft-deleted recipes must not issue new Store indents; the GET
+            # list already omits them, but a crafted POST can still send an id.
+            dish = db.query(
+                "SELECT * FROM dishes WHERE id = ? AND is_active = 1",
+                (dish_id,),
+                one=True,
+            )
         if dish is None:
             errors.append("Please select a dish.")
 
@@ -690,42 +946,43 @@ def calculate():
 
         scaled = scale_recipe(ingredients, dish["base_persons"], persons)
 
-        # Freeze the result. If the recipe is corrected next month, a reprint of
-        # this requisition must still show what actually went to the Store.
-        requisition_id = db.execute(
-            """INSERT INTO requisitions
-                   (dish_id, dish_name_snapshot, base_persons_snapshot, persons_required,
-                    course_name, meal_type, meal_date, generated_by, generated_by_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                dish["id"],
-                dish["name"],
-                dish["base_persons"],
-                persons,
-                course_name,
-                meal_type,
-                meal_date,
-                session["user_id"],
-                session.get("full_name") or session.get("username"),
-            ),
-        )
-        for item in scaled:
-            db.execute(
-                """INSERT INTO requisition_items
-                       (requisition_id, ingredient_name, base_quantity, base_unit,
-                        exact_quantity, display_quantity, display_unit, sort_order)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        # Freeze the result in one transaction. A failure mid-loop must not
+        # leave a Store requisition with a partial ingredient list.
+        with db.transaction():
+            requisition_id = db.execute(
+                """INSERT INTO requisitions
+                       (dish_id, dish_name_snapshot, base_persons_snapshot, persons_required,
+                        course_name, meal_type, meal_date, generated_by, generated_by_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    requisition_id,
-                    item["name"],
-                    item["base_quantity"],
-                    item["base_unit"],
-                    item["exact"],
-                    item["display_qty"],
-                    item["display_unit"],
-                    item["sort_order"],
+                    dish["id"],
+                    dish["name"],
+                    dish["base_persons"],
+                    persons,
+                    course_name,
+                    meal_type,
+                    meal_date,
+                    session["user_id"],
+                    session.get("full_name") or session.get("username"),
                 ),
             )
+            for item in scaled:
+                db.execute(
+                    """INSERT INTO requisition_items
+                           (requisition_id, ingredient_name, base_quantity, base_unit,
+                            exact_quantity, display_quantity, display_unit, sort_order)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        requisition_id,
+                        item["name"],
+                        item["base_quantity"],
+                        item["base_unit"],
+                        item["exact"],
+                        item["display_qty"],
+                        item["display_unit"],
+                        item["sort_order"],
+                    ),
+                )
 
         return redirect(url_for("requisition_view", requisition_id=requisition_id))
 
@@ -827,6 +1084,7 @@ def users():
                    VALUES (?, ?, ?, ?, 1)""",
                 (username, full_name, generate_password_hash(password), role),
             )
+            db.commit()
             flash(f"User '{username}' created. They must change this password at first login.",
                   "success")
         return redirect(url_for("users"))
@@ -846,6 +1104,7 @@ def user_toggle(user_id):
     if user is None:
         abort(404)
     db.execute("UPDATE users SET is_active = ? WHERE id = ?", (0 if user["is_active"] else 1, user_id))
+    db.commit()
     flash(f"User '{user['username']}' {'deactivated' if user['is_active'] else 'reactivated'}.",
           "success")
     return redirect(url_for("users"))
@@ -865,6 +1124,7 @@ def user_reset(user_id):
             "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
             (generate_password_hash(new_password), user_id),
         )
+        db.commit()
         flash(f"Password reset for '{user['username']}'. They must change it at next login.",
               "success")
     return redirect(url_for("users"))

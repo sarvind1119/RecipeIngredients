@@ -11,6 +11,7 @@ is divided by that number.
 import argparse
 import glob
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -43,29 +44,62 @@ class ReviewRecipe:
 # --------------------------------------------------------------------------
 
 
-def build_recipes(paths, use_llm=True, known_names=()):
-    """Read documents into review-ready recipes."""
+def build_recipes(paths, use_llm=True, known_names=(), collect_warnings=None):
+    """Read documents into review-ready recipes.
+
+    If collect_warnings is a list, human-readable notes are appended (e.g. Groq
+    skipped, empty vision result) so the web UI can flash them instead of
+    silently showing an empty form.
+    """
     recipes = []
+    warnings = collect_warnings if collect_warnings is not None else []
 
     for path in paths:
+        ext = os.path.splitext(path)[1].lower()
+        is_image = ext in extract_mod.IMAGE_EXTENSIONS
+
+        # Photos/scans need AI; without it Paddle is often missing and the form
+        # would open empty — force the LLM path when Groq is configured.
+        effective_llm = use_llm or (is_image and llm.is_available())
+
         for raw in extract_mod.extract(path):
             rows = (
                 [_row_from_sheet(r) for r in raw.sheet_rows]
                 if raw.sheet_rows
                 else parse_recipe_lines(raw.lines)
             )
+            dish_name = raw.dish_name
+            base_persons = raw.base_persons
+            had_page_image = bool(raw.page_images)
 
-            if use_llm:
-                rows = _apply_llm_fallback(raw, rows)
+            if effective_llm:
+                rows, dish_name, base_persons = _apply_llm_fallback(
+                    raw, rows, dish_name, base_persons, warnings
+                )
+            elif had_page_image or is_image:
+                warnings.append(
+                    "This looks like a photo/scan. AI is off or not configured "
+                    "(GROQ_API_KEY), so little or nothing may be read. "
+                    "Enable AI assistance and set the key in recipe_import/.env."
+                )
 
             for row in rows:
                 row.suggested_name = suggest_known_name(row.name, known_names)
-                row.name = title_case(row.name)
+                # Do not title-case AI/Hindi names aggressively — title_case is
+                # for Latin OCR crumbs; leave non-ASCII as transcribed.
+                if row.name.isascii():
+                    row.name = title_case(row.name)
+
+            if (had_page_image or is_image) and not rows:
+                warnings.append(
+                    f"No ingredients could be read from '{os.path.basename(path)}'. "
+                    "Try a clearer photo (full page, good light, less glare) or type the recipe by hand."
+                )
 
             recipes.append(
                 ReviewRecipe(
-                    dish_name=raw.dish_name or _dish_name_from_file(raw.source_file),
-                    base_persons=raw.base_persons,
+                    dish_name=dish_name or _dish_name_from_file(raw.source_file),
+                    base_persons=base_persons,
                     category=DEFAULT_CATEGORY,
                     rows=rows,
                 )
@@ -77,61 +111,114 @@ def build_recipes(paths, use_llm=True, known_names=()):
 def _row_from_sheet(record):
     """A spreadsheet row skips the line parser but not the validation."""
     name = clean_name(record.get("ingredient_name", ""))
-    unit, unit_note = resolve_unit(record.get("unit", ""))
-    source_line = " ".join(v for v in record.values() if v)
+    qty_raw = (record.get("quantity") or "").strip()
+    unit_raw = (record.get("unit") or "").strip()
 
-    try:
-        quantity = float(record.get("quantity") or 0) or None
-    except ValueError:
-        quantity = None
+    # "2 kg" in the quantity cell, or unit column filled separately.
+    quantity = None
+    unit = None
+    unit_note = "no unit stated in the document"
 
-    row = ParsedRow(name=name, quantity=quantity, unit=unit,
-                    source_line=source_line, source="sheet")
+    if qty_raw:
+        match = re.match(
+            r"^(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>[A-Za-z.]+)?\s*$", qty_raw
+        )
+        if match:
+            try:
+                quantity = float(match.group("qty"))
+            except ValueError:
+                quantity = None
+            if match.group("unit") and not unit_raw:
+                unit_raw = match.group("unit")
+        else:
+            try:
+                quantity = float(qty_raw)
+            except ValueError:
+                # Leave free text for the human — may be "to taste".
+                quantity = None
+
+    if unit_raw:
+        unit, unit_note = resolve_unit(unit_raw)
+    else:
+        unit, unit_note = None, "no unit stated in the document"
+
+    source_line = " ".join(
+        v for k, v in record.items() if v and k != "category"
+    )
+
+    row = ParsedRow(
+        name=name,
+        quantity=quantity if quantity and quantity > 0 else None,
+        unit=unit,
+        source_line=source_line,
+        source="sheet",
+    )
 
     if not name:
         row.status, row.note = "needs_name", "no ingredient name in this row"
-    elif quantity is None:
+    elif row.quantity is None:
         row.status, row.note = "needs_qty", "quantity missing or not a number"
-    elif unit is None:
+    elif row.unit is None:
         row.status, row.note = "needs_unit", unit_note
     return row
 
 
-def _apply_llm_fallback(raw, rows):
-    """Send only the residue to Claude - flagged lines, or a doubtful scan."""
-    if not llm.is_available():
-        return rows
+def _apply_llm_fallback(raw, rows, dish_name, base_persons, warnings=None):
+    """Groq assist: vision-first for page images; text only for flagged lines.
 
-    doubtful_scan = (
-        raw.page_images
-        and (raw.ocr_confidence is None or raw.ocr_confidence < llm.OCR_CONFIDENCE_FLOOR)
-    )
+    Photos/scans/handwriting keep the page image on `raw`. When Groq is
+    available those pages are read by vision first — PaddleOCR alone is not
+    enough for handwriting or messy phone photos. Digital Word/PDF text still
+    uses the rules parser; only flagged residue is sent as text.
+    """
+    warnings = warnings if warnings is not None else []
+
+    if not llm.is_available():
+        if raw.page_images:
+            warnings.append(
+                "Groq AI is not available (missing GROQ_API_KEY or groq package). "
+                "Photo/scan import needs it."
+            )
+        return rows, dish_name, base_persons
 
     try:
-        if doubtful_scan:
-            replacement = llm.resolve_page_image(raw.page_images[0])
-            if replacement:
-                return replacement
-            return rows
+        if raw.page_images:
+            # Vision-first whenever we have a page image (photo, scan, or
+            # scanned PDF page). OCR lines are a fallback if vision is empty.
+            vision = llm.resolve_page_image(raw.page_images[0])
+            if vision.rows:
+                if vision.dish_name and not dish_name:
+                    dish_name = vision.dish_name
+                if vision.base_persons and not base_persons:
+                    base_persons = vision.base_persons
+                return vision.rows, dish_name, base_persons
+
+            # Vision returned nothing useful — keep OCR/rules rows if any.
+            msg = "Groq vision returned no ingredient rows; kept any OCR text found."
+            print(f"  {msg}", file=sys.stderr)
+            warnings.append(msg)
+            return rows, dish_name, base_persons
 
         flagged = [r for r in rows if not r.is_ok]
         if not flagged:
-            return rows
+            return rows, dish_name, base_persons
 
         lines = list(dict.fromkeys(r.source_line for r in flagged if r.source_line))
-        resolved = llm.resolve_lines(lines, dish_name=raw.dish_name)
+        resolved = llm.resolve_lines(lines, dish_name=dish_name or raw.dish_name)
         if not resolved:
-            return rows
+            return rows, dish_name, base_persons
 
         # Replace the flagged rows with the model's reading of the same lines,
         # keeping every row the rules parser already settled.
         replaced_lines = set(lines)
         kept = [r for r in rows if r.source_line not in replaced_lines or r.is_ok]
-        return kept + resolved
+        return kept + resolved, dish_name, base_persons
 
     except Exception as exc:  # the fallback is a bonus, never a dependency
-        print(f"  Claude fallback skipped: {exc}", file=sys.stderr)
-        return rows
+        msg = f"Groq could not read this page: {exc}"
+        print(f"  {msg}", file=sys.stderr)
+        warnings.append(msg)
+        return rows, dish_name, base_persons
 
 
 def _dish_name_from_file(source_file):
@@ -159,10 +246,10 @@ def cmd_extract(args):
         return 1
 
     if args.no_llm:
-        print("Claude fallback disabled (--no-llm).")
+        print("AI fallback disabled (--no-llm).")
     elif not llm.is_available():
-        print("Claude fallback unavailable - unresolved lines will stay flagged.")
-        print("  Set ANTHROPIC_API_KEY, or run 'ant auth login'.")
+        print("Groq AI unavailable - photo/scan lines may stay empty or flagged.")
+        print("  Set GROQ_API_KEY in recipe_import/.env and: pip install groq")
 
     recipes = build_recipes(
         paths, use_llm=not args.no_llm, known_names=_known_ingredient_names()
@@ -275,17 +362,33 @@ def _load_one(conn, recipe, dry_run=False):
     if not rows:
         return False, f"REFUSED {name}: no usable ingredient rows."
 
-    clash = conn.execute("SELECT id FROM dishes WHERE name = ?", (name,)).fetchone()
-    if clash:
+    # Soft-deleted dishes still occupy the UNIQUE name; only active clashes
+    # are "already exists". An inactive holder is reclaimed below so the CLI
+    # matches the web form's restore-by-re-add behaviour.
+    clash = conn.execute(
+        "SELECT id, is_active FROM dishes WHERE name = ?", (name,)
+    ).fetchone()
+    if clash and clash["is_active"]:
         return False, f"SKIPPED {name}: a dish with this name already exists."
 
     if dry_run:
         return True, f"READY {name}: {len(rows)} ingredients for {base_persons} persons."
 
-    dish_id = conn.execute(
-        "INSERT INTO dishes (name, category, base_persons, notes) VALUES (?, ?, ?, ?)",
-        (name, category, base_persons, "Imported from a mess department document."),
-    ).lastrowid
+    if clash and not clash["is_active"]:
+        dish_id = clash["id"]
+        conn.execute(
+            """UPDATE dishes
+                  SET category = ?, base_persons = ?, notes = ?, is_active = 1,
+                      updated_at = datetime('now', 'localtime')
+                WHERE id = ?""",
+            (category, base_persons, "Imported from a mess department document.", dish_id),
+        )
+        conn.execute("DELETE FROM dish_ingredients WHERE dish_id = ?", (dish_id,))
+    else:
+        dish_id = conn.execute(
+            "INSERT INTO dishes (name, category, base_persons, notes) VALUES (?, ?, ?, ?)",
+            (name, category, base_persons, "Imported from a mess department document."),
+        ).lastrowid
 
     for order, row in enumerate(rows):
         ingredient_id = db.get_or_create_ingredient(
@@ -315,7 +418,7 @@ def main(argv=None):
     p_extract.add_argument("paths", nargs="+", help="files, folders or globs")
     p_extract.add_argument("-o", "--output", default="review.csv")
     p_extract.add_argument(
-        "--no-llm", action="store_true", help="rules parser only; do not call Claude"
+        "--no-llm", action="store_true", help="rules parser only; do not call Groq"
     )
     p_extract.set_defaults(func=cmd_extract)
 

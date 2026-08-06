@@ -3,8 +3,9 @@
 
 {% block content %}
 <h1>Users</h1>
-<p class="sub"><strong>Admin</strong> maintains recipes. <strong>Staff</strong> can
-  calculate requirements and print them, but cannot alter a standard recipe.</p>
+<p class="sub"><strong>Staff</strong> can add and edit recipes, calculate
+  requirements and print them. <strong>Admin</strong> can also create users and
+  download backups.</p>
 
 <table class="data">
   <thead>
@@ -63,8 +64,8 @@
       <div>
         <label for="role">Role</label>
         <select id="role" name="role">
-          <option value="staff">Staff — calculate and print only</option>
-          <option value="admin">Admin — can also maintain recipes</option>
+          <option value="staff">Staff — recipes, calculate and print</option>
+          <option value="admin">Admin — also manage users and backups</option>
         </select>
       </div>
     </div>
