@@ -4,6 +4,7 @@ Run from the project root:  python app.py
 Then open http://localhost:5002 (or http://<this-pc-ip>:5002 from the LAN).
 """
 
+import io
 import json
 import os
 import secrets
@@ -519,6 +520,14 @@ IMPORT_UPLOAD_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp",
 }
 MAX_IMPORT_BYTES = 25 * 1024 * 1024
+
+# Werkzeug enforces this while the request body is still arriving, so a file
+# that is too big is refused instead of being written to the Mess PC's disk in
+# full and only then measured. That matters here: mess.db sits on the same
+# volume, so a mis-selected 4 GB video could fill the disk out from under a
+# requisition write. The os.path.getsize() check in dish_import() stays as a
+# second line of defence for anything that reaches the parser another way.
+app.config["MAX_CONTENT_LENGTH"] = MAX_IMPORT_BYTES
 
 
 _importer_cli = None
@@ -1141,14 +1150,34 @@ def admin_backup():
     mode for a backup feature. sqlite3's online backup API produces a coherent
     single-file copy of a live database instead.
     """
-    tmp_dir = tempfile.mkdtemp(prefix="mess_backup_")
-    path = os.path.join(tmp_dir, f"mess_backup_{date.today():%Y-%m-%d}.db")
-    dest = sqlite3.connect(path)
-    try:
-        db.get_db().backup(dest)
-    finally:
-        dest.close()
-    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+    name = f"mess_backup_{date.today():%Y-%m-%d}.db"
+
+    # The snapshot holds every recipe *and* every password hash, so it must not
+    # be left behind in the temp folder - a weekly backup would otherwise
+    # accumulate a year of full database copies on the Mess PC.
+    #
+    # Read into memory and delete the file here rather than deferring the
+    # cleanup to after_this_request: send_file() still has the file open when
+    # request teardown runs, and Windows refuses to unlink an open file, so a
+    # deferred delete would silently leave every copy in place on exactly the
+    # platform this is deployed on. mess.db is a few MB; holding it briefly is
+    # cheaper than the leak.
+    with tempfile.TemporaryDirectory(prefix="mess_backup_") as tmp_dir:
+        path = os.path.join(tmp_dir, name)
+        dest = sqlite3.connect(path)
+        try:
+            db.get_db().backup(dest)
+        finally:
+            dest.close()
+        with open(path, "rb") as fh:
+            payload = io.BytesIO(fh.read())
+
+    return send_file(
+        payload,
+        mimetype="application/vnd.sqlite3",
+        as_attachment=True,
+        download_name=name,
+    )
 
 
 # --- Error pages ----------------------------------------------------------
@@ -1162,6 +1191,16 @@ def forbidden(error):  # noqa: ARG001
 @app.errorhandler(404)
 def not_found(error):  # noqa: ARG001
     return render_template("error.html", code=404, message="Page not found."), 404
+
+
+@app.errorhandler(413)
+def payload_too_large(error):  # noqa: ARG001
+    # Raised by MAX_CONTENT_LENGTH, in practice only from the document importer.
+    return render_template(
+        "error.html",
+        code=413,
+        message="That file is larger than 25 MB. Try a smaller scan or photo.",
+    ), 413
 
 
 if __name__ == "__main__":

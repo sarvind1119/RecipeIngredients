@@ -509,6 +509,38 @@ class TestBackup:
         assert "Chicken Biryani" in names
 
 
+    def test_backup_leaves_no_copy_in_the_temp_folder(self, admin):
+        """The snapshot holds every password hash - it must not be left behind."""
+        import glob
+        import tempfile
+
+        pattern = os.path.join(tempfile.gettempdir(), "mess_backup_*")
+        before = set(glob.glob(pattern))
+        assert admin.get("/admin/backup").status_code == 200
+        assert set(glob.glob(pattern)) == before
+
+
+class TestUploadLimit:
+    def test_max_content_length_is_set(self, application):
+        """Enforced while the body arrives, so an oversized file is never
+        written to the Mess PC's disk and only measured afterwards."""
+        import app as appmod
+
+        assert application.config["MAX_CONTENT_LENGTH"] == appmod.MAX_IMPORT_BYTES
+
+    def test_oversized_upload_gets_the_413_page_not_a_traceback(self, admin, application):
+        import app as appmod
+
+        oversized = b"x" * (appmod.MAX_IMPORT_BYTES + 1024)
+        r = admin.post(
+            "/dishes/import",
+            data={"document": (io.BytesIO(oversized), "huge.png")},
+            content_type="multipart/form-data",
+        )
+        assert r.status_code == 413
+        assert b"larger than 25 MB" in r.data
+
+
 class TestDatabasePragmas:
     def test_wal_and_foreign_keys_are_enabled(self, application):
         conn = db.connect()

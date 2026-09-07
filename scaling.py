@@ -172,6 +172,14 @@ def validate_ingredient_rows(names, quantities, units):
             errors.append(f"Row {idx + 1}: '{qty_raw}' is not a valid quantity.")
             continue
 
+        # isfinite() before the sign test, because float() accepts "nan" and
+        # "inf" and neither is caught by `<= 0` - both comparisons are False.
+        # "inf" would otherwise be stored happily and print as "inf" in the
+        # Required Qty column of a Store indent; "nan" is coerced to NULL by
+        # SQLite and trips NOT NULL in the middle of the write instead.
+        if not math.isfinite(quantity):
+            errors.append(f"Row {idx + 1}: '{qty_raw}' is not a valid quantity.")
+            continue
         if quantity <= 0:
             errors.append(f"Row {idx + 1}: quantity for '{name}' must be greater than zero.")
             continue

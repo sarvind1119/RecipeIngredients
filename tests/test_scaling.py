@@ -10,7 +10,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scaling import format_qty, scale_quantity, scale_recipe  # noqa: E402
+from scaling import (  # noqa: E402
+    format_qty,
+    scale_quantity,
+    scale_recipe,
+    validate_ingredient_rows,
+)
 
 
 class TestRequirementExample:
@@ -148,6 +153,26 @@ class TestGuards:
     def test_unknown_unit_raises(self):
         with pytest.raises(ValueError, match="unknown unit"):
             scale_quantity(3, 10, 90, "handful")
+
+
+class TestNonFiniteQuantities:
+    """float() accepts "nan" and "inf", and `<= 0` catches neither.
+
+    An "inf" that got through validated cleanly and printed as "inf" in the
+    Required Qty column of a Store indent; a "nan" is stored by SQLite as NULL
+    and trips NOT NULL in the middle of the requisition write instead.
+    """
+
+    @pytest.mark.parametrize("bad", ["nan", "NaN", "inf", "-inf", "Infinity"])
+    def test_non_finite_quantity_is_rejected(self, bad):
+        rows, errors = validate_ingredient_rows(["Rice"], [bad], ["kg"])
+        assert rows == []
+        assert errors and "not a valid quantity" in errors[0]
+
+    def test_ordinary_quantities_still_pass(self):
+        rows, errors = validate_ingredient_rows(["Rice"], ["2.5"], ["kg"])
+        assert errors == []
+        assert rows == [{"name": "Rice", "quantity": 2.5, "unit": "kg"}]
 
 
 class TestScaleRecipe:

@@ -59,14 +59,24 @@ work day to day:
 
 | | Admin | Staff |
 |---|---|---|
-| Add, edit and remove recipes | Yes | No |
+| Add, edit and remove recipes | Yes | Yes |
+| Import recipes from a document | Yes | Yes |
 | Calculate a requirement | Yes | Yes |
 | Print / download PDF and Excel | Yes | Yes |
 | View history | Yes | Yes |
-| Manage users, download backups | Yes | No |
+| Manage users, download backups | Yes | **No** |
 
-Staff cannot alter a standard recipe. This is enforced on the server, not merely
-by hiding buttons.
+Everyone who can sign in can maintain the recipe book — the Mess cooks are the
+people who know what a dish actually takes, so keeping recipes admin-only just
+meant corrections never got made.
+
+Only an Admin can create or deactivate accounts, reset passwords, or download
+the database backup. That is enforced on the server, not merely by hiding
+buttons: a Staff account that types `/users` or `/admin/backup` gets a 403.
+
+Removing a recipe is never destructive (see *Past requirements are never
+rewritten* below), so a mistaken deletion is recoverable — open the dish and
+restore it.
 
 ---
 
