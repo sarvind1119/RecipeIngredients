@@ -14,7 +14,13 @@ groq
 python-dotenv
 pillow
 
-# Offline OCR for scans when Groq is unavailable. Optional and heavy — skip
+# Local OCR (ONNX, pip-only - no PaddlePaddle, no Tesseract install). Reads every
+# photo alongside Groq and cross-checks its figures; reads alone when Groq is
+# unavailable. See recipe_import/ocr_verify.py.
+rapidocr
+onnxruntime
+
+# Older offline OCR for scans when Groq is unavailable. Optional and heavy — skip
 # both lines if you always use Groq vision for images.
 # paddleocr
 # paddlepaddle
