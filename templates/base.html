@@ -20,6 +20,7 @@
   <nav>
     <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
     <a href="{{ url_for('calculate') }}" class="{% if request.endpoint == 'calculate' %}active{% endif %}">Calculate</a>
+    <a href="{{ url_for('meal_new') }}" class="{% if request.endpoint in ('meal_new', 'meal_view', 'menus') %}active{% endif %}">Meal indent</a>
     <a href="{{ url_for('dishes') }}" class="{% if request.endpoint in ('dishes', 'dish_detail', 'dish_form', 'dish_new', 'dish_edit', 'dish_import', 'dish_import_review') %}active{% endif %}">Recipes</a>
     <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">History</a>
     {% if is_admin %}

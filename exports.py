@@ -7,6 +7,7 @@ break outright.
 
 import io
 from datetime import datetime
+from xml.sax.saxutils import escape
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -17,6 +18,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     KeepTogether,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -71,19 +73,74 @@ def _draw_page_furniture(canvas, doc):
     canvas.restoreState()
 
 
-def build_pdf(requisition, items):
-    """Return the requisition as PDF bytes."""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
+def _new_doc(buffer, title):
+    return SimpleDocTemplate(
         buffer,
         pagesize=A4,
         leftMargin=18 * mm,
         rightMargin=18 * mm,
         topMargin=32 * mm,  # clears the header drawn in _draw_page_furniture
         bottomMargin=18 * mm,
-        title=f"Requisition {requisition['id']} — {requisition['dish_name_snapshot']}",
+        title=title,
     )
 
+
+def _signature_block():
+    signatures = Table(
+        [["", "", ""], ["Prepared By", "Mess Secretary", "Store Officer"]],
+        colWidths=[58 * mm, 58 * mm, 58 * mm],
+        rowHeights=[16 * mm, 6 * mm],
+    )
+    signatures.setStyle(
+        TableStyle(
+            [
+                ("LINEABOVE", (0, 1), (-1, 1), 0.6, colors.black),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 1), (-1, 1), 9),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ]
+        )
+    )
+    return signatures
+
+
+def _meta_table(meta):
+    meta_table = Table(meta, colWidths=[28 * mm, 52 * mm, 28 * mm, 66 * mm])
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.black),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ]
+        )
+    )
+    return meta_table
+
+
+def build_pdf(requisition, items):
+    """Return the requisition as PDF bytes."""
+    buffer = io.BytesIO()
+    doc = _new_doc(
+        buffer, f"Requisition {requisition['id']} — {requisition['dish_name_snapshot']}"
+    )
+    doc.build(
+        _requisition_story(requisition, items),
+        onFirstPage=_draw_page_furniture,
+        onLaterPages=_draw_page_furniture,
+    )
+    buffer.seek(0)
+    return buffer
+
+
+def _requisition_story(requisition, items):
+    """The flowables for one dish requisition - shared by the single-dish PDF
+    and the dish slips that follow a consolidated meal sheet."""
     styles = getSampleStyleSheet()
     label = ParagraphStyle("label", parent=styles["Normal"], fontSize=9, leading=13)
 
@@ -106,22 +163,7 @@ def build_pdf(requisition, items):
         ],
         ["Generated On", requisition["generated_at"], "", ""],
     ]
-    meta_table = Table(meta, colWidths=[28 * mm, 52 * mm, 28 * mm, 66 * mm])
-    meta_table.setStyle(
-        TableStyle(
-            [
-                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOX", (0, 0), (-1, -1), 0.6, colors.black),
-                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ]
-        )
-    )
-    story.append(meta_table)
+    story.append(_meta_table(meta))
     story.append(Spacer(1, 5 * mm))
 
     data = [_TABLE_HEADINGS]
@@ -177,30 +219,11 @@ def build_pdf(requisition, items):
         label,
     )
 
-    signatures = Table(
-        [["", "", ""], ["Prepared By", "Mess Secretary", "Store Officer"]],
-        colWidths=[58 * mm, 58 * mm, 58 * mm],
-        rowHeights=[16 * mm, 6 * mm],
-    )
-    signatures.setStyle(
-        TableStyle(
-            [
-                ("LINEABOVE", (0, 1), (-1, 1), 0.6, colors.black),
-                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 1), (-1, 1), 9),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ]
-        )
-    )
-
     # KeepTogether stops the signature block being orphaned onto a page of its
     # own - a requisition whose signature lines landed alone on page 3 gets sent
     # straight back by the Store.
-    story.append(KeepTogether([note, Spacer(1, 8 * mm), signatures]))
-
-    doc.build(story, onFirstPage=_draw_page_furniture, onLaterPages=_draw_page_furniture)
-    buffer.seek(0)
-    return buffer
+    story.append(KeepTogether([note, Spacer(1, 8 * mm), _signature_block()]))
+    return story
 
 
 def build_excel(requisition, items):
@@ -208,7 +231,15 @@ def build_excel(requisition, items):
     wb = Workbook()
     ws = wb.active
     ws.title = "Requirement"
+    _write_requisition_sheet(ws, requisition, items)
 
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def _write_requisition_sheet(ws, requisition, items):
     bold = Font(bold=True)
     title_font = Font(bold=True, size=14)
     header_font = Font(bold=True, color="FFFFFF")
@@ -291,13 +322,213 @@ def build_excel(requisition, items):
 
     ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
 
+
+def export_filename(requisition, extension):
+    dish = "".join(c if c.isalnum() else "_" for c in requisition["dish_name_snapshot"])
+    stamp = datetime.now().strftime("%Y%m%d")
+    return f"Requisition_{requisition['id']}_{dish}_{stamp}.{extension}"
+
+
+# --- Consolidated meal indent ---------------------------------------------
+
+MEAL_DOC_TITLE = "CONSOLIDATED MEAL REQUISITION"
+
+_MEAL_HEADINGS = ["S.No", "Ingredient", "Total Required", "Unit", "Used In"]
+
+
+def _used_in_text(line):
+    return "; ".join(
+        f"{use['dish']} {format_qty(use['qty'])} {use['unit']}" for use in line["used_in"]
+    )
+
+
+def _flag_text(line):
+    if not line["also_in_units"]:
+        return ""
+    return f"also indented in {', '.join(line['also_in_units'])} - issue both lines"
+
+
+def _meal_meta(meal, slips):
+    return [
+        ["Meal Indent No.", str(meal["id"]), "Meal", meal["meal_type"]],
+        ["Date of Meal", meal["meal_date"], "Course", meal["course_name"] or "—"],
+        ["Meal Strength", f"{meal['default_persons']} persons", "Dishes", str(len(slips))],
+        ["Generated By", meal["generated_by_name"] or "—", "Generated On", meal["generated_at"]],
+    ]
+
+
+def build_meal_pdf(meal, consolidated, slips):
+    """The consolidated sheet first, then every dish slip on its own page.
+
+    One document, so the Store gets a single file to pick from and the kitchen
+    still has each dish's own list.
+    """
+    buffer = io.BytesIO()
+    doc = _new_doc(buffer, f"Meal indent {meal['id']} — {meal['meal_type']} {meal['meal_date']}")
+
+    styles = getSampleStyleSheet()
+    heading = ParagraphStyle("meal_heading", parent=styles["Heading3"], alignment=1,
+                             spaceAfter=2 * mm)
+    cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10)
+    ingredient = ParagraphStyle("ingredient", parent=styles["Normal"], fontSize=9, leading=11)
+    label = ParagraphStyle("label", parent=styles["Normal"], fontSize=9, leading=13)
+
+    story = [Paragraph(MEAL_DOC_TITLE, heading), _meta_table(_meal_meta(meal, slips)),
+             Spacer(1, 5 * mm)]
+
+    data = [_MEAL_HEADINGS]
+    for idx, line in enumerate(consolidated, start=1):
+        name = escape(line["name"])
+        flag = _flag_text(line)
+        if flag:
+            name += f"<br/><font size=7 color='#b3261e'>{escape(flag)}</font>"
+        data.append(
+            [
+                str(idx),
+                Paragraph(name, ingredient),
+                format_qty(line["quantity"]),
+                line["unit"],
+                Paragraph(escape(_used_in_text(line)), cell),
+            ]
+        )
+
+    table = Table(
+        data,
+        colWidths=[12 * mm, 46 * mm, 24 * mm, 16 * mm, 76 * mm],
+        repeatRows=1,
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTNAME", (2, 1), (2, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+                ("ALIGN", (3, 0), (3, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("BOX", (0, 0), (-1, -1), 0.8, colors.black),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5f9")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story.append(table)
+    story.append(Spacer(1, 10 * mm))
+    note = Paragraph(
+        "<b>Note:</b> each total is the sum of the 'Required Qty' on the dish slips "
+        "that follow, so it reconciles with them line for line.",
+        label,
+    )
+    story.append(KeepTogether([note, Spacer(1, 8 * mm), _signature_block()]))
+
+    for requisition, items in slips:
+        story.append(PageBreak())
+        story.extend(_requisition_story(requisition, items))
+
+    doc.build(story, onFirstPage=_draw_page_furniture, onLaterPages=_draw_page_furniture)
+    buffer.seek(0)
+    return buffer
+
+
+def _sheet_title(name, taken):
+    """Excel sheet names: at most 31 chars, none of []:*?/\\, unique per book."""
+    clean = "".join("_" if c in '[]:*?/\\' else c for c in name).strip("' ") or "Dish"
+    base = clean[:31]
+    title, n = base, 2
+    while title.casefold() in taken:
+        suffix = f" ({n})"
+        title = base[: 31 - len(suffix)] + suffix
+        n += 1
+    taken.add(title.casefold())
+    return title
+
+
+def build_meal_excel(meal, consolidated, slips):
+    """A Consolidated sheet, then one sheet per dish."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Consolidated"
+    taken = {"consolidated"}
+
+    bold = Font(bold=True)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1F3A5F")
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    centre = Alignment(horizontal="center", vertical="center")
+    wrap = Alignment(wrap_text=True, vertical="top")
+
+    ws.merge_cells("A1:F1")
+    ws["A1"] = MESS_TITLE
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A1"].alignment = centre
+    ws.merge_cells("A2:F2")
+    ws["A2"] = MEAL_DOC_TITLE
+    ws["A2"].font = bold
+    ws["A2"].alignment = centre
+
+    row = 4
+    for key1, val1, key2, val2 in _meal_meta(meal, slips):
+        ws.cell(row=row, column=1, value=key1).font = bold
+        ws.cell(row=row, column=2, value=val1)
+        ws.cell(row=row, column=4, value=key2).font = bold
+        ws.cell(row=row, column=5, value=val2)
+        row += 1
+
+    row += 1
+    header_row = row
+    for col, heading in enumerate(_MEAL_HEADINGS + ["Check"], start=1):
+        c = ws.cell(row=header_row, column=col, value=heading)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = centre
+        c.border = border
+
+    for idx, line in enumerate(consolidated, start=1):
+        row += 1
+        values = [
+            idx,
+            line["name"],
+            float(line["quantity"]),  # numeric, so the Store can sort and sum
+            line["unit"],
+            _used_in_text(line),
+            _flag_text(line),
+        ]
+        for col, value in enumerate(values, start=1):
+            c = ws.cell(row=row, column=col, value=value)
+            c.border = border
+            if col == 3:
+                c.font = bold
+            if col in (5, 6):
+                c.alignment = wrap
+        ws.cell(row=row, column=1).alignment = centre
+        ws.cell(row=row, column=4).alignment = centre
+
+    row += 3
+    ws.cell(row=row, column=1, value="Prepared By").font = bold
+    ws.cell(row=row, column=3, value="Mess Secretary").font = bold
+    ws.cell(row=row, column=5, value="Store Officer").font = bold
+
+    for col, width in enumerate([8, 30, 16, 10, 60, 30], start=1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+
+    for requisition, items in slips:
+        sheet = wb.create_sheet(_sheet_title(requisition["dish_name_snapshot"], taken))
+        _write_requisition_sheet(sheet, requisition, items)
+
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
     return buffer
 
 
-def export_filename(requisition, extension):
-    dish = "".join(c if c.isalnum() else "_" for c in requisition["dish_name_snapshot"])
-    stamp = datetime.now().strftime("%Y%m%d")
-    return f"Requisition_{requisition['id']}_{dish}_{stamp}.{extension}"
+def meal_export_filename(meal, extension):
+    meal_type = "".join(c if c.isalnum() else "_" for c in meal["meal_type"])
+    return f"MealIndent_{meal['id']}_{meal_type}_{meal['meal_date']}.{extension}"

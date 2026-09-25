@@ -31,11 +31,19 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import db
-from exports import build_excel, build_pdf, export_filename
+from exports import (
+    build_excel,
+    build_meal_excel,
+    build_meal_pdf,
+    build_pdf,
+    export_filename,
+    meal_export_filename,
+)
 from scaling import (
     DISH_CATEGORIES,
     MEAL_TYPES,
     UNITS,
+    consolidate,
     format_qty,
     scale_recipe,
     validate_ingredient_rows,
@@ -702,7 +710,9 @@ def dish_import():
 
         warnings = []
         try:
-            recipes = importer.build_recipes(
+            # Same as importer.build_recipes, plus an OCR cross-check of photos.
+            from recipe_import import ocr_verify
+            recipes = ocr_verify.build_recipes(
                 [saved],
                 use_llm=use_llm,
                 known_names=[r["name"] for r in db.query("SELECT name FROM ingredients")],
@@ -953,45 +963,12 @@ def calculate():
                 selected=request.form,
             )
 
-        scaled = scale_recipe(ingredients, dish["base_persons"], persons)
-
         # Freeze the result in one transaction. A failure mid-loop must not
         # leave a Store requisition with a partial ingredient list.
         with db.transaction():
-            requisition_id = db.execute(
-                """INSERT INTO requisitions
-                       (dish_id, dish_name_snapshot, base_persons_snapshot, persons_required,
-                        course_name, meal_type, meal_date, generated_by, generated_by_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    dish["id"],
-                    dish["name"],
-                    dish["base_persons"],
-                    persons,
-                    course_name,
-                    meal_type,
-                    meal_date,
-                    session["user_id"],
-                    session.get("full_name") or session.get("username"),
-                ),
+            requisition_id = _freeze_requisition(
+                dish, ingredients, persons, course_name, meal_type, meal_date
             )
-            for item in scaled:
-                db.execute(
-                    """INSERT INTO requisition_items
-                           (requisition_id, ingredient_name, base_quantity, base_unit,
-                            exact_quantity, display_quantity, display_unit, sort_order)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        requisition_id,
-                        item["name"],
-                        item["base_quantity"],
-                        item["base_unit"],
-                        item["exact"],
-                        item["display_qty"],
-                        item["display_unit"],
-                        item["sort_order"],
-                    ),
-                )
 
         return redirect(url_for("requisition_view", requisition_id=requisition_id))
 
@@ -1001,6 +978,53 @@ def calculate():
         meal_types=MEAL_TYPES,
         selected={"meal_date": date.today().isoformat()},
     )
+
+
+def _freeze_requisition(dish, ingredients, persons, course_name, meal_type, meal_date,
+                        meal_indent_id=None):
+    """Scale one dish and write it as a frozen requisition. Does not commit.
+
+    Shared by the single-dish calculator and the meal indent so the two can
+    never write a requisition differently. Callers wrap it in db.transaction().
+    """
+    scaled = scale_recipe(ingredients, dish["base_persons"], persons)
+    requisition_id = db.execute(
+        """INSERT INTO requisitions
+               (dish_id, dish_name_snapshot, base_persons_snapshot, persons_required,
+                course_name, meal_type, meal_date, generated_by, generated_by_name,
+                meal_indent_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            dish["id"],
+            dish["name"],
+            dish["base_persons"],
+            persons,
+            course_name,
+            meal_type,
+            meal_date,
+            session["user_id"],
+            session.get("full_name") or session.get("username"),
+            meal_indent_id,
+        ),
+    )
+    for item in scaled:
+        db.execute(
+            """INSERT INTO requisition_items
+                   (requisition_id, ingredient_name, base_quantity, base_unit,
+                    exact_quantity, display_quantity, display_unit, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                requisition_id,
+                item["name"],
+                item["base_quantity"],
+                item["base_unit"],
+                item["exact"],
+                item["display_qty"],
+                item["display_unit"],
+                item["sort_order"],
+            ),
+        )
+    return requisition_id
 
 
 def _load_requisition(requisition_id):
@@ -1049,6 +1073,257 @@ def requisition_excel(requisition_id):
     )
 
 
+# --- Meal indents: several dishes, one consolidated Store sheet -----------
+
+def _parse_persons(raw, label):
+    """Whole number >= 1, or (None, error message)."""
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None, f"{label} must be a whole number."
+    if value < 1:
+        return None, f"{label} must be at least 1."
+    return value, None
+
+
+def _meal_form(active_dishes, selected, rows):
+    return render_template(
+        "meal_form.html",
+        dishes=active_dishes,
+        meal_types=MEAL_TYPES,
+        menus=db.query("SELECT id, name FROM menus ORDER BY name"),
+        selected=selected,
+        rows=rows or [{"dish_id": "", "persons": ""}],
+    )
+
+
+def _save_menu(name, meal_type, default_persons, chosen):
+    """Create, or replace by name, a saved menu. Caller owns the transaction."""
+    existing = db.query("SELECT id FROM menus WHERE name = ?", (name,), one=True)
+    if existing:
+        menu_id = existing["id"]
+        db.execute(
+            "UPDATE menus SET name = ?, meal_type = ?, default_persons = ? WHERE id = ?",
+            (name, meal_type, default_persons, menu_id),
+        )
+        db.execute("DELETE FROM menu_dishes WHERE menu_id = ?", (menu_id,))
+    else:
+        menu_id = db.execute(
+            """INSERT INTO menus (name, meal_type, default_persons, created_by_name)
+               VALUES (?, ?, ?, ?)""",
+            (name, meal_type, default_persons,
+             session.get("full_name") or session.get("username")),
+        )
+    for order, (dish, override, _persons, _ingredients) in enumerate(chosen):
+        db.execute(
+            """INSERT INTO menu_dishes (menu_id, dish_id, persons, sort_order)
+               VALUES (?, ?, ?, ?)""",
+            (menu_id, dish["id"], override, order),
+        )
+    return existing is not None
+
+
+@app.route("/meal/new", methods=["GET", "POST"])
+@login_required
+def meal_new():
+    active_dishes = db.query(
+        "SELECT id, name, category, base_persons FROM dishes WHERE is_active = 1 ORDER BY name"
+    )
+
+    if request.method == "GET":
+        selected = {"meal_date": date.today().isoformat()}
+        rows = []
+        menu_id = request.args.get("menu_id", "")
+        if menu_id:
+            menu = db.query("SELECT * FROM menus WHERE id = ?", (menu_id,), one=True)
+            if menu is None:
+                abort(404)
+            selected.update(
+                meal_type=menu["meal_type"],
+                default_persons=menu["default_persons"] or "",
+                save_menu_name=menu["name"],
+            )
+            members = db.query(
+                """SELECT md.dish_id, md.persons, d.name, d.is_active
+                     FROM menu_dishes md JOIN dishes d ON d.id = md.dish_id
+                    WHERE md.menu_id = ? ORDER BY md.sort_order, md.id""",
+                (menu_id,),
+            )
+            for m in members:
+                if not m["is_active"]:
+                    # A removed recipe must not issue a new indent; say so
+                    # rather than silently shrinking the meal.
+                    flash(f"'{m['name']}' has been removed from the recipes and was "
+                          "left out of this menu.", "warning")
+                    continue
+                rows.append({"dish_id": m["dish_id"], "persons": m["persons"] or ""})
+            flash(f"Loaded menu '{menu['name']}'. Check the date and strength, then generate.",
+                  "info")
+        return _meal_form(active_dishes, selected, rows)
+
+    form = request.form
+    meal_type = form.get("meal_type", "").strip()
+    meal_date = form.get("meal_date", "").strip() or date.today().isoformat()
+    course_name = form.get("course_name", "").strip()
+    menu_name = form.get("save_menu_name", "").strip()
+    dish_ids = form.getlist("dish_id")
+    overrides = form.getlist("dish_persons")
+    rows = [
+        {"dish_id": dish_ids[i], "persons": overrides[i] if i < len(overrides) else ""}
+        for i in range(len(dish_ids))
+    ]
+
+    errors = []
+    if meal_type not in MEAL_TYPES:
+        errors.append("Please select a meal type.")
+    default_persons, err = _parse_persons(form.get("default_persons", ""),
+                                          "Meal strength (persons)")
+    if err:
+        errors.append(err)
+
+    chosen, seen = [], set()
+    for idx, row in enumerate(rows, start=1):
+        dish_id = (row["dish_id"] or "").strip()
+        persons_raw = str(row["persons"] or "").strip()
+        if not dish_id:
+            if persons_raw:
+                errors.append(f"Row {idx}: persons entered without a dish.")
+            continue  # blank row - habit, not error
+        # Active only: the list omits removed recipes, a crafted POST may not.
+        dish = db.query("SELECT * FROM dishes WHERE id = ? AND is_active = 1",
+                        (dish_id,), one=True)
+        if dish is None:
+            errors.append(f"Row {idx}: please select a valid dish.")
+            continue
+        if dish["id"] in seen:
+            errors.append(f"'{dish['name']}' is selected more than once.")
+            continue
+        seen.add(dish["id"])
+
+        override = None
+        if persons_raw:
+            override, err = _parse_persons(persons_raw, f"Persons for '{dish['name']}'")
+            if err:
+                errors.append(err)
+                continue
+        ingredients = _dish_ingredients(dish["id"])
+        if not ingredients:
+            errors.append(f"'{dish['name']}' has no ingredients recorded yet.")
+            continue
+        chosen.append((dish, override, override or default_persons, ingredients))
+
+    if not seen and not errors:
+        errors.append("Please add at least one dish.")
+
+    if errors:
+        for message in errors:
+            flash(message, "danger")
+        return _meal_form(active_dishes, form, rows)
+
+    # The whole meal is one transaction: the Store must never receive a
+    # consolidated sheet missing a dish because the 7th insert failed.
+    with db.transaction():
+        meal_id = db.execute(
+            """INSERT INTO meal_indents
+                   (meal_type, meal_date, course_name, default_persons,
+                    generated_by, generated_by_name)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (meal_type, meal_date, course_name, default_persons, session["user_id"],
+             session.get("full_name") or session.get("username")),
+        )
+        for dish, _override, persons, ingredients in chosen:
+            _freeze_requisition(dish, ingredients, persons, course_name, meal_type,
+                                meal_date, meal_indent_id=meal_id)
+        replaced = _save_menu(menu_name, meal_type, default_persons, chosen) if menu_name else False
+
+    if menu_name:
+        flash(f"Menu '{menu_name}' {'updated' if replaced else 'saved'}.", "success")
+    return redirect(url_for("meal_view", meal_id=meal_id))
+
+
+def _load_meal(meal_id):
+    """The meal, its frozen dish slips and the consolidation of those slips.
+
+    Consolidation reads the stored requisition_items only - never the live
+    recipe - so a reprint matches what the Store was first given.
+    """
+    meal = db.query("SELECT * FROM meal_indents WHERE id = ?", (meal_id,), one=True)
+    if meal is None:
+        abort(404)
+    slips = []
+    for requisition in db.query(
+        "SELECT * FROM requisitions WHERE meal_indent_id = ? ORDER BY id", (meal_id,)
+    ):
+        _, items = _load_requisition(requisition["id"])
+        slips.append((requisition, items))
+    consolidated = consolidate(
+        (requisition["dish_name_snapshot"], item)
+        for requisition, items in slips
+        for item in items
+    )
+    return meal, slips, consolidated
+
+
+@app.route("/meal/<int:meal_id>")
+@login_required
+def meal_view(meal_id):
+    meal, slips, consolidated = _load_meal(meal_id)
+    return render_template("meal_result.html", meal=meal, slips=slips,
+                           consolidated=consolidated)
+
+
+@app.route("/meal/<int:meal_id>/pdf")
+@login_required
+def meal_pdf(meal_id):
+    meal, slips, consolidated = _load_meal(meal_id)
+    return send_file(
+        build_meal_pdf(meal, consolidated, slips),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name=meal_export_filename(meal, "pdf"),
+    )
+
+
+@app.route("/meal/<int:meal_id>/excel")
+@login_required
+def meal_excel(meal_id):
+    meal, slips, consolidated = _load_meal(meal_id)
+    return send_file(
+        build_meal_excel(meal, consolidated, slips),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=meal_export_filename(meal, "xlsx"),
+    )
+
+
+@app.route("/menus")
+@login_required
+def menus():
+    rows = db.query(
+        """SELECT m.*, COUNT(md.id) AS dish_count,
+                  GROUP_CONCAT(d.name, ', ') AS dish_names
+             FROM menus m
+             LEFT JOIN menu_dishes md ON md.menu_id = m.id
+             LEFT JOIN dishes d ON d.id = md.dish_id
+            GROUP BY m.id
+            ORDER BY m.name"""
+    )
+    return render_template("menus.html", menus=rows)
+
+
+@app.route("/menus/<int:menu_id>/delete", methods=["POST"])
+@login_required
+def menu_delete(menu_id):
+    menu = db.query("SELECT name FROM menus WHERE id = ?", (menu_id,), one=True)
+    if menu is None:
+        abort(404)
+    db.execute("DELETE FROM menus WHERE id = ?", (menu_id,))
+    db.commit()
+    flash(f"Menu '{menu['name']}' deleted. Meal indents already issued are unaffected.",
+          "success")
+    return redirect(url_for("menus"))
+
+
 @app.route("/history")
 @login_required
 def history():
@@ -1059,7 +1334,25 @@ def history():
         sql += " WHERE dish_name_snapshot LIKE ? OR course_name LIKE ?"
         args = [f"%{search}%", f"%{search}%"]
     sql += " ORDER BY generated_at DESC, id DESC LIMIT 300"
-    return render_template("history.html", requisitions=db.query(sql, args), search=search)
+
+    meal_sql = """SELECT mi.*, COUNT(r.id) AS dish_count,
+                         GROUP_CONCAT(r.dish_name_snapshot, ', ') AS dish_names
+                    FROM meal_indents mi
+                    LEFT JOIN requisitions r ON r.meal_indent_id = mi.id"""
+    meal_args = []
+    if search:
+        meal_sql += """ WHERE mi.course_name LIKE ? OR mi.id IN
+                          (SELECT meal_indent_id FROM requisitions
+                            WHERE dish_name_snapshot LIKE ?)"""
+        meal_args = [f"%{search}%", f"%{search}%"]
+    meal_sql += " GROUP BY mi.id ORDER BY mi.generated_at DESC, mi.id DESC LIMIT 100"
+
+    return render_template(
+        "history.html",
+        requisitions=db.query(sql, args),
+        meals=db.query(meal_sql, meal_args),
+        search=search,
+    )
 
 
 # --- Administration -------------------------------------------------------

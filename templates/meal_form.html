@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Meal indent{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Meal indent</h1>
+  {% if menus %}
+  <form method="get" class="inline-form no-print">
+    <select name="menu_id" aria-label="Saved menu" required>
+      <option value="">— Load a saved menu —</option>
+      {% for m in menus %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="btn">Load</button>
+    <a href="{{ url_for('menus') }}" class="btn ghost">Manage menus</a>
+  </form>
+  {% endif %}
+</div>
+<p class="sub">Select every dish being prepared for one meal. Each dish gets its own
+  requisition as usual, and the Store also gets one consolidated sheet with the
+  common ingredients added up.</p>
+
+{% if dishes %}
+<form method="post" class="panel">
+  <div class="grid-2">
+    <div>
+      <label for="meal_type">Meal</label>
+      <select id="meal_type" name="meal_type" required>
+        <option value="">— Select —</option>
+        {% for m in meal_types %}
+          <option value="{{ m }}" {% if selected.get('meal_type') == m %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="meal_date">Date of meal</label>
+      <input type="date" id="meal_date" name="meal_date"
+             value="{{ selected.get('meal_date') or today }}">
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <label for="default_persons">Meal strength (persons)</label>
+      <input type="number" id="default_persons" name="default_persons" min="1" required
+             value="{{ selected.get('default_persons', '') }}" placeholder="e.g. 90">
+      <p class="hint">Applies to every dish unless you enter a different figure for it below.</p>
+    </div>
+    <div>
+      <label for="course_name">Course / occasion <span class="opt">(optional)</span></label>
+      <input type="text" id="course_name" name="course_name"
+             value="{{ selected.get('course_name', '') }}" placeholder="e.g. Foundation Course 2026">
+    </div>
+  </div>
+
+  <div class="quick-persons no-print">
+    <span>Common strengths:</span>
+    {% for n in [60, 90, 120, 180] %}
+      <button type="button" class="chip" data-persons="{{ n }}">{{ n }}</button>
+    {% endfor %}
+  </div>
+
+  <h2>Dishes</h2>
+  <table class="data entry" id="dish-table">
+    <thead>
+      <tr><th class="sn">#</th><th>Dish</th><th class="qty">Persons <small>(blank = meal strength)</small></th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr class="dish-row">
+        <td class="sn"></td>
+        <td>
+          <select name="dish_id">
+            <option value="">— Select a dish —</option>
+            {% for d in dishes %}
+              <option value="{{ d.id }}" {% if row.dish_id|string == d.id|string %}selected{% endif %}>
+                {{ d.name }} ({{ d.category }}) — base {{ d.base_persons }}
+              </option>
+            {% endfor %}
+          </select>
+        </td>
+        <td class="qty"><input type="number" name="dish_persons" min="1" value="{{ row.persons }}"></td>
+        <td><button type="button" class="row-remove" title="Remove dish">&times;</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <button type="button" id="add-row" class="btn ghost">+ Add dish</button>
+
+  <label for="save_menu_name">Save this selection as a menu <span class="opt">(optional)</span></label>
+  <input type="text" id="save_menu_name" name="save_menu_name" maxlength="80"
+         value="{{ selected.get('save_menu_name', '') }}" placeholder="e.g. Sunday Lunch">
+  <p class="hint">Saving under an existing name replaces that menu.</p>
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Generate meal indent</button>
+  </div>
+</form>
+
+<script>
+(function () {
+  var tbody = document.querySelector('#dish-table tbody');
+  var template = tbody.querySelector('tr.dish-row').cloneNode(true);
+  template.querySelector('select').value = '';
+  template.querySelector('input').value = '';
+
+  function renumber() {
+    tbody.querySelectorAll('tr.dish-row').forEach(function (row, i) {
+      row.querySelector('.sn').textContent = i + 1;
+    });
+  }
+  function addRow(focus) {
+    var row = template.cloneNode(true);
+    tbody.appendChild(row);
+    renumber();
+    if (focus) row.querySelector('select').focus();
+  }
+
+  document.getElementById('add-row').addEventListener('click', function () { addRow(true); });
+  tbody.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('row-remove')) return;
+    e.target.closest('tr').remove();
+    if (!tbody.querySelector('tr.dish-row')) addRow(false);
+    renumber();
+  });
+  // Picking a dish in the last row opens the next, so a 12-dish lunch is
+  // entered without reaching for the mouse between dishes.
+  tbody.addEventListener('change', function (e) {
+    if (e.target.tagName !== 'SELECT' || !e.target.value) return;
+    var rows = tbody.querySelectorAll('tr.dish-row');
+    if (e.target.closest('tr') === rows[rows.length - 1]) addRow(false);
+  });
+
+  var strength = document.getElementById('default_persons');
+  document.querySelectorAll('.chip').forEach(function (chip) {
+    chip.addEventListener('click', function () { strength.value = chip.dataset.persons; });
+  });
+  renumber();
+})();
+</script>
+{% else %}
+  <p class="empty">No recipes are on record yet.
+    <a href="{{ url_for('dish_new') }}">Add the first one</a>.
+  </p>
+{% endif %}
+{% endblock %}

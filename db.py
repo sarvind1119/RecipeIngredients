@@ -73,11 +73,30 @@ def init_db():
     conn = connect()
     try:
         conn.executescript(schema)
+        _migrate(conn)
         conn.commit()
         seeded = _seed_admin(conn)
     finally:
         conn.close()
     return seeded
+
+
+def _migrate(conn):
+    """Bring a mess.db created by an earlier version up to the current schema.
+
+    CREATE TABLE IF NOT EXISTS never adds a column to a table that already
+    exists, so the live database on the Mess PC would otherwise lack
+    requisitions.meal_indent_id and every meal indent would fail to save.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(requisitions)")}
+    if "meal_indent_id" not in columns:
+        conn.execute(
+            "ALTER TABLE requisitions ADD COLUMN meal_indent_id INTEGER "
+            "REFERENCES meal_indents (id) ON DELETE SET NULL"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requisitions_meal ON requisitions (meal_indent_id)"
+    )
 
 
 def _seed_admin(conn):
