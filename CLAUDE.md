@@ -66,6 +66,15 @@ rows written to `requisitions` + `requisition_items` → redirect to
 `/requisition/<id>` → PDF/Excel read back from those stored rows, never
 recalculated.
 
+**Data flow for a meal indent:** `/meal/new` (several dishes, one meal
+strength with per-dish overrides) → one `meal_indents` row plus one ordinary
+requisition per dish, linked by `requisitions.meal_indent_id`, all in one
+transaction → `/meal/<id>` → `scaling.consolidate()` over the *stored*
+`requisition_items` → one PDF (consolidated sheet, then every dish slip) or
+Excel (Consolidated sheet + one sheet per dish). Both `/calculate` and the meal
+route write through `_freeze_requisition()`; keep it that way so they can't
+drift.
+
 ## Key Implementation Notes
 
 **Requisitions are snapshots, not views.** `requisition_items` stores the
@@ -74,6 +83,20 @@ calculated figures, and `requisitions` stores `dish_name_snapshot` and
 must never change a requisition that was already issued to the Store. Do not
 "simplify" the export routes to recompute from the live recipe — that silently
 rewrites history. `TestSnapshotIntegrity` guards this.
+
+**A consolidated total is the sum of the dish slips' Required Qty**, not a
+re-rounding of the exact figures. The Store checks the sheet against the slips,
+and every dish's figure is already rounded up, so the kitchen can always split
+the issue. g/kg and ml/litre merge; the same ingredient in units that cannot be
+converted (kg vs nos, tsp vs tbsp) stays on separate flagged lines, because
+converting would invent a figure.
+
+**`db._migrate()` adds `requisitions.meal_indent_id` to an existing `mess.db`.**
+`CREATE TABLE IF NOT EXISTS` never adds columns, so any new column on an
+existing table needs a step there too, not only in `schema.sql`.
+
+**Saved menus** (`menus`, `menu_dishes`) are templates, not history. Hard
+delete is fine; a soft-deleted dish is skipped with a warning when loaded.
 
 **Dish deletion is always soft** (`is_active = 0`). Past requisitions reference
 the row.
@@ -158,6 +181,15 @@ importer still runs and hard lines stay flagged. Quantity is nullable so the
 model answers "not stated" rather than inventing a figure; every AI row is
 `source=llm` on the review sheet.
 
+**Photos are read twice and cross-checked** ([recipe_import/ocr_verify.py](recipe_import/ocr_verify.py),
+called by the web import route). RapidOCR (pip-only, local) and Groq vision
+read the same image in parallel; each AI row is looked up in the OCR text.
+Same figure → confirmed; different figure → quantity blanked and row flagged
+with both readings; not found → AI reading kept, noted as unconfirmed. No Groq
+→ OCR lines go through the rules parser. Non-image files pass straight to
+`cli.build_recipes`. Groq retires models: set `GROQ_VISION_MODEL` /
+`GROQ_TEXT_MODEL` in `.env` rather than trusting the defaults in `llm.py`.
+
 **PaddleOCR is optional offline fallback only.** Prefer Groq vision for images.
 `extract.py` still keeps the page image so vision can re-read it.
 
@@ -187,10 +219,8 @@ removed alongside the row it annotates.
 
 ## Scope
 
-V1 is single-dish scaling only. Menu-wise planning, consolidation of common
-ingredients across dishes, Store approval workflow and inventory are out of
-scope but the schema is normalised for them — consolidation becomes a
-`GROUP BY ingredient_id` across several dishes.
+Single-dish scaling, meal indents with consolidation across dishes, and saved
+menus are in. Store approval workflow and inventory are out of scope.
 
 Per-ingredient non-linear scaling (salt and whole spices do not truly scale in
 proportion) was considered and deferred; everything scales linearly as the

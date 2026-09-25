@@ -851,3 +851,230 @@ class TestDocumentImportUI:
         )
         assert response.status_code == 200
         assert b"Could not read that document" in response.data
+
+
+DAL = {
+    "name": "Dal Tadka",
+    "category": "Dal & Vegetables",
+    "base_persons": "10",
+    "notes": "",
+    "ingredient_name": ["Toor Dal", "onion", "Salt"],
+    "ingredient_quantity": ["1", "250", "50"],
+    "ingredient_unit": ["kg", "g", "g"],
+}
+
+
+def _meal(client, dish_ids, persons=None, default="90", **extra):
+    persons = persons or [""] * len(dish_ids)
+    data = {"meal_type": "Lunch", "meal_date": "2026-09-26", "course_name": "FC 2026",
+            "default_persons": default, "dish_id": dish_ids, "dish_persons": persons}
+    data.update(extra)
+    return client.post("/meal/new", data=data, follow_redirects=True)
+
+
+def _count(table):
+    conn = db.connect()
+    n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    conn.close()
+    return n
+
+
+class TestMealIndent:
+    @pytest.fixture(autouse=True)
+    def _recipes(self, admin):
+        admin.post("/dishes/new", data=BIRYANI)
+        admin.post("/dishes/new", data=DAL)
+        self.admin = admin
+
+    def test_one_meal_writes_a_requisition_per_dish(self):
+        r = _meal(self.admin, ["1", "2"])
+        assert r.status_code == 200
+        assert _count("meal_indents") == 1
+        conn = db.connect()
+        rows = conn.execute(
+            "SELECT dish_name_snapshot, persons_required, meal_indent_id FROM requisitions"
+        ).fetchall()
+        conn.close()
+        assert {tuple(row) for row in rows} == {
+            ("Chicken Biryani", 90, 1), ("Dal Tadka", 90, 1)}
+
+    def test_shared_ingredients_are_totalled(self):
+        html = _meal(self.admin, ["1", "2"]).data.decode()
+        # Onion: 13.5 kg (biryani) + 2.25 kg (dal, 2250 g) = 15.75 kg
+        assert "15.75" in html
+        # Salt: 900 g + 450 g = 1.35 kg
+        assert "1.35" in html
+        assert "Chicken Biryani 13.5 kg; Dal Tadka 2.25 kg" in html
+
+    def test_per_dish_override_beats_the_meal_strength(self):
+        html = _meal(self.admin, ["1", "2"], persons=["", "30"]).data.decode()
+        # Onion: 13.5 kg + 750 g = 14.25 kg
+        assert "14.25" in html
+        conn = db.connect()
+        dal = conn.execute(
+            "SELECT persons_required FROM requisitions WHERE dish_name_snapshot = 'Dal Tadka'"
+        ).fetchone()
+        conn.close()
+        assert dal[0] == 30
+
+    def test_blank_rows_are_ignored(self):
+        _meal(self.admin, ["1", "", "2", ""])
+        assert _count("requisitions") == 2
+
+    def test_duplicate_dish_is_rejected_and_nothing_written(self):
+        r = _meal(self.admin, ["1", "1"])
+        assert b"selected more than once" in r.data
+        assert _count("meal_indents") == 0 and _count("requisitions") == 0
+
+    def test_soft_deleted_dish_is_rejected(self):
+        self.admin.post("/dishes/2/delete")
+        r = _meal(self.admin, ["1", "2"])
+        assert b"valid dish" in r.data
+        assert _count("requisitions") == 0
+
+    def test_at_least_one_dish_required(self):
+        r = _meal(self.admin, ["", ""])
+        assert b"at least one dish" in r.data
+
+    def test_bad_strength_and_override_rejected(self):
+        assert b"at least 1" in _meal(self.admin, ["1"], default="0").data
+        assert b"whole number" in _meal(self.admin, ["1"], persons=["abc"]).data
+        assert _count("meal_indents") == 0
+
+    def test_input_survives_a_validation_failure(self):
+        html = _meal(self.admin, ["1", "1"], persons=["", "45"], default="77").data.decode()
+        assert 'value="77"' in html and 'value="45"' in html
+
+    def test_failure_mid_meal_leaves_nothing_behind(self, monkeypatch):
+        real_execute = db.execute
+        calls = {"n": 0}
+
+        def flaky_execute(sql, args=()):
+            if "INSERT INTO requisitions" in sql:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise sqlite3.OperationalError("simulated failure on the second dish")
+            return real_execute(sql, args)
+
+        monkeypatch.setattr(db, "execute", flaky_execute)
+        with pytest.raises(sqlite3.OperationalError):
+            _meal(self.admin, ["1", "2"])
+        assert _count("meal_indents") == 0
+        assert _count("requisitions") == 0
+        assert _count("requisition_items") == 0
+
+    def test_editing_a_recipe_does_not_change_an_issued_meal(self):
+        _meal(self.admin, ["1", "2"])
+        amended = dict(DAL, ingredient_quantity=["1", "500", "50"])
+        self.admin.post("/dishes/2/edit", data=amended)
+        assert "15.75" in self.admin.get("/meal/1").data.decode()
+
+    def test_meal_pdf_holds_sheet_and_slips(self):
+        _meal(self.admin, ["1", "2"])
+        r = self.admin.get("/meal/1/pdf")
+        assert r.status_code == 200 and r.data[:4] == b"%PDF"
+        assert r.data.count(b"/Type /Page\n") >= 3 or b"Page 3" in r.data
+
+    def test_meal_excel_has_consolidated_and_dish_sheets(self):
+        from openpyxl import load_workbook
+
+        _meal(self.admin, ["1", "2"])
+        wb = load_workbook(io.BytesIO(self.admin.get("/meal/1/excel").data))
+        assert wb.sheetnames == ["Consolidated", "Chicken Biryani", "Dal Tadka"]
+        ws = wb["Consolidated"]
+        onion = next(
+            [ws.cell(row=rw, column=c).value for c in range(1, 7)]
+            for rw in range(1, ws.max_row + 1)
+            if str(ws.cell(row=rw, column=2).value).casefold() == "onion"
+        )
+        assert onion[2] == 15.75 and onion[3] == "kg"
+
+    def test_missing_meal_is_404(self):
+        assert self.admin.get("/meal/99").status_code == 404
+
+    def test_history_lists_the_meal(self):
+        _meal(self.admin, ["1", "2"])
+        html = self.admin.get("/history").data.decode()
+        assert "Meal indents" in html and "Meal #1" in html
+
+    def test_staff_can_build_a_meal(self, staff):
+        r = _meal(staff, ["1", "2"])
+        assert r.status_code == 200 and b"15.75" in r.data
+
+    def test_single_dish_calculate_is_not_part_of_a_meal(self):
+        self.admin.post("/calculate", data={"dish_id": "1", "persons_required": "90",
+                                            "meal_type": "Lunch", "meal_date": "2026-08-10"})
+        conn = db.connect()
+        assert conn.execute("SELECT meal_indent_id FROM requisitions").fetchone()[0] is None
+        conn.close()
+
+
+class TestSavedMenus:
+    @pytest.fixture(autouse=True)
+    def _recipes(self, admin):
+        admin.post("/dishes/new", data=BIRYANI)
+        admin.post("/dishes/new", data=DAL)
+        self.admin = admin
+
+    def test_save_and_load(self):
+        r = _meal(self.admin, ["1", "2"], persons=["", "30"], save_menu_name="Sunday Lunch")
+        assert b"Sunday Lunch&#39; saved" in r.data
+        html = self.admin.get("/meal/new?menu_id=1").data.decode()
+        assert 'value="90"' in html and 'value="30"' in html
+        assert "Sunday Lunch" in self.admin.get("/menus").data.decode()
+
+    def test_saving_under_the_same_name_replaces(self):
+        _meal(self.admin, ["1", "2"], save_menu_name="Sunday Lunch")
+        _meal(self.admin, ["2"], save_menu_name="sunday lunch")
+        assert _count("menus") == 1
+        assert _count("menu_dishes") == 1
+
+    def test_soft_deleted_dish_is_skipped_on_load(self):
+        _meal(self.admin, ["1", "2"], save_menu_name="Sunday Lunch")
+        self.admin.post("/dishes/2/delete")
+        html = self.admin.get("/meal/new?menu_id=1").data.decode()
+        assert "left out of this menu" in html
+
+    def test_delete_menu_keeps_issued_meals(self):
+        _meal(self.admin, ["1", "2"], save_menu_name="Sunday Lunch")
+        self.admin.post("/menus/1/delete")
+        assert _count("menus") == 0 and _count("menu_dishes") == 0
+        assert self.admin.get("/meal/1").status_code == 200
+
+    def test_failed_meal_does_not_save_the_menu(self):
+        _meal(self.admin, ["1", "1"], save_menu_name="Broken")
+        assert _count("menus") == 0
+
+
+class TestMigration:
+    def test_old_database_gains_meal_indent_column(self, tmp_path, monkeypatch):
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(path)
+        # The requisitions table as it was before meal indents existed.
+        conn.executescript("""
+            CREATE TABLE requisitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dish_id INTEGER, dish_name_snapshot TEXT NOT NULL,
+                base_persons_snapshot INTEGER NOT NULL,
+                persons_required INTEGER NOT NULL, course_name TEXT NOT NULL DEFAULT '',
+                meal_type TEXT NOT NULL, meal_date TEXT NOT NULL,
+                generated_by INTEGER, generated_by_name TEXT NOT NULL DEFAULT '',
+                generated_at TEXT NOT NULL DEFAULT '');
+            INSERT INTO requisitions (dish_name_snapshot, base_persons_snapshot,
+                persons_required, meal_type, meal_date)
+            VALUES ('Old Dish', 10, 90, 'Lunch', '2026-01-01');
+        """)
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(db, "DB_PATH", str(path))
+        db.init_db()
+        db.init_db()  # safe to re-run
+
+        conn = db.connect()
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(requisitions)")}
+        old = conn.execute(
+            "SELECT dish_name_snapshot, meal_indent_id FROM requisitions").fetchone()
+        conn.close()
+        assert "meal_indent_id" in columns
+        assert tuple(old) == ("Old Dish", None)

@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scaling import (  # noqa: E402
+    consolidate,
     format_qty,
     scale_quantity,
     scale_recipe,
@@ -207,3 +208,98 @@ class TestFormatQty:
     )
     def test_trims_trailing_zeros(self, value, expected):
         assert format_qty(value) == expected
+
+
+def _item(name, qty, unit):
+    return {"ingredient_name": name, "display_quantity": qty, "display_unit": unit}
+
+
+class TestConsolidate:
+    """The consolidated Store sheet for a meal of several dishes."""
+
+    def test_kg_and_g_merge_into_one_line(self):
+        lines = consolidate([
+            ("Aloo Gobi", _item("Onion", 10.05, "kg")),
+            ("Dal", _item("Onion", 750, "g")),
+        ])
+        assert len(lines) == 1
+        assert (lines[0]["quantity"], lines[0]["unit"]) == (10.8, "kg")
+
+    def test_total_is_the_sum_of_required_quantities_not_a_rerounding(self):
+        # 2.1 + 2.1 + 2.1 would already be 6.3; the point is nothing is
+        # recomputed from exact figures, so the sheet matches the slips.
+        lines = consolidate([(f"Dish {i}", _item("Tomato", 2.1, "kg")) for i in range(3)])
+        assert lines[0]["quantity"] == 6.3
+        assert repr(lines[0]["quantity"]) == "6.3"
+
+    def test_small_totals_stay_in_grams(self):
+        lines = consolidate([
+            ("A", _item("Salt", 450, "g")),
+            ("B", _item("Salt", 0.5, "kg")),
+        ])
+        assert (lines[0]["quantity"], lines[0]["unit"]) == (950, "g")
+
+    def test_ml_and_litre_merge(self):
+        lines = consolidate([
+            ("A", _item("Milk", 1.5, "litre")),
+            ("B", _item("Milk", 600, "ml")),
+        ])
+        assert (lines[0]["quantity"], lines[0]["unit"]) == (2.1, "litre")
+
+    def test_countables_add_as_whole_numbers(self):
+        lines = consolidate([
+            ("A", _item("Eggs", 33, "nos")),
+            ("B", _item("Eggs", 12, "nos")),
+        ])
+        assert (lines[0]["quantity"], lines[0]["unit"]) == (45, "nos")
+
+    def test_names_merge_case_insensitively(self):
+        lines = consolidate([
+            ("A", _item("Onion", 1, "kg")),
+            ("B", _item("onion ", 1, "kg")),
+        ])
+        assert len(lines) == 1 and lines[0]["name"] == "Onion"
+
+    def test_incompatible_units_stay_separate_and_are_flagged(self):
+        lines = consolidate([
+            ("A", _item("Onion", 5, "kg")),
+            ("B", _item("Onion", 10, "nos")),
+        ])
+        assert len(lines) == 2
+        by_unit = {line["unit"]: line for line in lines}
+        assert by_unit["kg"]["also_in_units"] == ["nos"]
+        assert by_unit["nos"]["also_in_units"] == ["kg"]
+
+    def test_tsp_and_tbsp_are_not_silently_converted(self):
+        lines = consolidate([
+            ("A", _item("Turmeric", 2, "tsp")),
+            ("B", _item("Turmeric", 1, "tbsp")),
+        ])
+        assert len(lines) == 2
+        assert all(line["also_in_units"] for line in lines)
+
+    def test_used_in_records_each_dish(self):
+        lines = consolidate([
+            ("Aloo Gobi", _item("Onion", 10.05, "kg")),
+            ("Dal", _item("Onion", 2.1, "kg")),
+        ])
+        assert lines[0]["used_in"] == [
+            {"dish": "Aloo Gobi", "qty": 10.05, "unit": "kg"},
+            {"dish": "Dal", "qty": 2.1, "unit": "kg"},
+        ]
+        assert lines[0]["quantity"] == 12.15
+
+    def test_lines_are_alphabetical(self):
+        lines = consolidate([
+            ("A", _item("Tomato", 1, "kg")),
+            ("A", _item("Chilli", 1, "kg")),
+            ("B", _item("onion", 1, "kg")),
+        ])
+        assert [line["name"] for line in lines] == ["Chilli", "onion", "Tomato"]
+
+    def test_unique_ingredients_pass_through(self):
+        lines = consolidate([("A", _item("Saffron", 2, "g"))])
+        assert lines[0]["quantity"] == 2 and lines[0]["also_in_units"] == []
+
+    def test_empty_meal(self):
+        assert consolidate([]) == []

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Saved menus{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Saved menus</h1>
+  <a href="{{ url_for('meal_new') }}" class="btn primary">New meal indent</a>
+</div>
+<p class="sub">A menu is a saved set of dishes for a meal. Load one to start a meal
+  indent, then check the date and strength. Save a menu from the meal indent form.</p>
+
+{% if menus %}
+<table class="data">
+  <thead>
+    <tr><th>Menu</th><th>Meal</th><th class="num">Strength</th><th>Dishes</th><th>Saved by</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for m in menus %}
+    <tr>
+      <td><strong>{{ m.name }}</strong></td>
+      <td>{{ m.meal_type or '—' }}</td>
+      <td class="num">{{ m.default_persons or '—' }}</td>
+      <td class="muted">{{ m.dish_count }} — {{ m.dish_names or '' }}</td>
+      <td>{{ m.created_by_name or '—' }}</td>
+      <td class="actions">
+        <a href="{{ url_for('meal_new', menu_id=m.id) }}" class="link-sm">Use</a>
+        <form method="post" action="{{ url_for('menu_delete', menu_id=m.id) }}"
+              data-name="{{ m.name }}"
+              onsubmit="return confirm('Delete the menu “' + this.dataset.name + '”? Issued meal indents are not affected.');">
+          <button type="submit" class="link-btn danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+  <p class="empty">No menus saved yet.</p>
+{% endif %}
+{% endblock %}

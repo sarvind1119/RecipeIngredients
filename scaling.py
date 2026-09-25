@@ -135,6 +135,84 @@ def scale_recipe(ingredient_rows, base_persons, target_persons):
     return scaled
 
 
+# Units that can be added together once converted to a common base. Anything
+# not listed (nos, packet, bunch, tsp, tbsp) only ever adds to itself.
+_UNIT_FAMILY = {
+    "g": ("mass", 1.0),
+    "kg": ("mass", 1000.0),
+    "ml": ("volume", 1.0),
+    "litre": ("volume", 1000.0),
+}
+_FAMILY_BASE_UNIT = {"mass": "g", "volume": "ml"}
+
+
+def consolidate(dish_items):
+    """Total the ingredients of several dishes for one consolidated Store sheet.
+
+    `dish_items` is a sequence of (dish_name, item) pairs, where each item is a
+    frozen requisition row carrying `ingredient_name`, `display_quantity` and
+    `display_unit`.
+
+    The total is the sum of each dish's *Required* quantity, not a re-rounding
+    of the exact figures. That keeps the consolidated sheet reconciling line for
+    line with the dish slips the Store also receives, and because every dish's
+    figure is already rounded up, the kitchen can always split the issue back
+    out without one dish coming up short.
+
+    g/kg and ml/litre are merged. The same ingredient in units that cannot be
+    converted (Onion in kg for one dish, in nos for another) stays on separate
+    lines, each flagged with the other units - converting would mean inventing
+    a weight per onion the mess never wrote down.
+    """
+    groups = {}
+    for dish_name, item in dish_items:
+        name = item["ingredient_name"].strip()
+        unit = item["display_unit"]
+        qty = float(item["display_quantity"])
+        family, factor = _UNIT_FAMILY.get(unit, (unit, 1.0))
+
+        key = (name.casefold(), family)
+        group = groups.setdefault(
+            key, {"name": name, "family": family, "base_total": 0.0, "used_in": []}
+        )
+        group["base_total"] = round(group["base_total"] + qty * factor, 3)
+        group["used_in"].append({"dish": dish_name, "qty": qty, "unit": unit})
+
+    units_by_name = {}
+    for (folded, _), group in groups.items():
+        units_by_name.setdefault(folded, []).append(group)
+
+    lines = []
+    for (folded, family), group in groups.items():
+        base_unit = _FAMILY_BASE_UNIT.get(family)
+        if base_unit:
+            qty, unit = _normalise_unit(group["base_total"], base_unit)
+        else:
+            qty, unit = group["base_total"], family
+
+        # Name each *other* unit the ingredient appears in, for the flag.
+        others = []
+        for other in units_by_name[folded]:
+            if other is group:
+                continue
+            for use in other["used_in"]:
+                if use["unit"] not in others:
+                    others.append(use["unit"])
+
+        lines.append(
+            {
+                "name": group["name"],
+                "quantity": qty,
+                "unit": unit,
+                "used_in": group["used_in"],
+                "also_in_units": others,
+            }
+        )
+
+    lines.sort(key=lambda line: (line["name"].casefold(), line["unit"]))
+    return lines
+
+
 def validate_ingredient_rows(names, quantities, units):
     """Validate parallel name/quantity/unit lists into clean ingredient rows.
 

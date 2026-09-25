@@ -12,6 +12,35 @@
   {% if search %}<a href="{{ url_for('history') }}" class="btn ghost">Clear</a>{% endif %}
 </form>
 
+{% if meals %}
+<h2>Meal indents</h2>
+<table class="data">
+  <thead>
+    <tr><th>No.</th><th>Meal</th><th>Date</th><th>Course</th><th class="num">Strength</th>
+      <th>Dishes</th><th>By</th><th>Generated</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for m in meals %}
+    <tr>
+      <td>{{ m.id }}</td>
+      <td><strong>{{ m.meal_type }}</strong></td>
+      <td>{{ m.meal_date }}</td>
+      <td>{{ m.course_name or '—' }}</td>
+      <td class="num strong">{{ m.default_persons }}</td>
+      <td class="muted">{{ m.dish_count }} — {{ m.dish_names or '' }}</td>
+      <td>{{ m.generated_by_name or '—' }}</td>
+      <td class="muted">{{ m.generated_at }}</td>
+      <td class="actions">
+        <a href="{{ url_for('meal_view', meal_id=m.id) }}" class="link-sm">Open</a>
+        <a href="{{ url_for('meal_pdf', meal_id=m.id) }}" class="link-sm" target="_blank" rel="noopener">PDF</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<h2>Dish requisitions</h2>
+{% endif %}
+
 {% if requisitions %}
 <table class="data">
   <thead>
@@ -24,7 +53,8 @@
     {% for r in requisitions %}
     <tr>
       <td>{{ r.id }}</td>
-      <td><strong>{{ r.dish_name_snapshot }}</strong></td>
+      <td><strong>{{ r.dish_name_snapshot }}</strong>
+        {% if r.meal_indent_id %}<a href="{{ url_for('meal_view', meal_id=r.meal_indent_id) }}" class="link-sm">Meal #{{ r.meal_indent_id }}</a>{% endif %}</td>
       <td>{{ r.course_name or '—' }}</td>
       <td>{{ r.meal_type }}</td>
       <td>{{ r.meal_date }}</td>
